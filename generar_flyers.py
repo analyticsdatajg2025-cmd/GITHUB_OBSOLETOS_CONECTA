@@ -217,13 +217,11 @@ def procesar_tienda(nombre_tienda, grupo):
         paginas.append(img_f.convert("RGB"))
     
     if paginas:
-        # Limpiamos nombre del archivo de tildes/ñ para el sistema de archivos
         t_clean = "".join(x for x in str(nombre_tienda) if x.isalnum() or x in " -_")
         pdf_fn = f"PDF_{t_clean}.pdf"
         pdf_path = os.path.join(output_dir, pdf_fn)
         paginas[0].save(pdf_path, save_all=True, append_images=paginas[1:])
         
-        # Encoding para links (evita 404 por ñ o tildes en la URL)
         pdf_fn_encoded = urllib.parse.quote(pdf_fn)
         return [nombre_tienda, f"{URL_BASE_PAGES}{pdf_fn_encoded}"]
     return None
@@ -235,15 +233,15 @@ print("Consolidando datos...")
 df_source = pd.DataFrame(ss.worksheet("Sheetgo_Detalle de Inventario").get_all_records())
 df_lookup = pd.DataFrame(ss.worksheet("listado_productos").get_all_records())
 
-# 1. Limpiar SKU (-EX) y Cruzar Datos (Simulando BUSCARV)
+# 1. Limpiar SKU (-EX) y Cruzar Datos
 df_source['sku_temp'] = df_source['%Cod Articulo'].astype(str).str.replace('-EX', '', case=False).str.strip()
 lookup_dict = df_lookup.set_index('sku')['base_image_path'].to_dict()
 df_source['image_link'] = df_source['sku_temp'].map(lookup_dict).fillna('')
 
-# 2. Actualizar hoja Detalle de Inventario
+# 2. Actualizar hoja Detalle de Inventario (Corregido para evitar advertencias)
 ws_detalle = ss.worksheet("Detalle de Inventario")
 ws_detalle.clear()
-ws_detalle.update([df_source.columns.values.tolist()] + df_source.values.tolist())
+ws_detalle.update(values=[df_source.columns.values.tolist()] + df_source.values.tolist(), range_name='A1')
 
 # 3. Procesar PDFs
 grupos = df_source.groupby('Tienda Retail')
@@ -254,18 +252,34 @@ with ThreadPoolExecutor(max_workers=4) as executor:
         res = f.result()
         if res: tienda_links_pdf.append(res)
 
-# 4. Actualizar FLYER_TIENDA
+# 4. Actualizar FLYER_TIENDA (Corregido para evitar advertencias)
 try:
     hoja_pdf = ss.worksheet("FLYER_TIENDA")
 except:
     hoja_pdf = ss.add_worksheet(title="FLYER_TIENDA", rows="100", cols="2")
 
 hoja_pdf.clear()
-hoja_pdf.update('A1', [["TIENDA RETAIL", "LINK PDF FLYERS"]] + tienda_links_pdf)
+datos_pdf = [["TIENDA RETAIL", "LINK PDF FLYERS"]] + tienda_links_pdf
+hoja_pdf.update(values=datos_pdf, range_name='A1')
 
-# 5. Ocultar hojas para Gerencia
-print("Ocultando pestañas técnicas...")
+# 5. Ocultar hojas para Gerencia (METODO CORRECTO)
+print("Ajustando visibilidad de pestañas...")
+requests_list = []
+hojas_visibles = ["FLYER_TIENDA", "Sheetgo_Detalle de Inventario"]
+
 for ws in ss.worksheets():
-    ws.update_properties({'hidden': ws.title != "FLYER_TIENDA"})
+    should_hide = ws.title not in hojas_visibles
+    requests_list.append({
+        "updateSheetProperties": {
+            "properties": {
+                "sheetId": ws.id,
+                "hidden": should_hide
+            },
+            "fields": "hidden"
+        }
+    })
+
+if requests_list:
+    ss.batch_update({"requests": requests_list})
 
 print("¡Todo listo en tiempo record!")
