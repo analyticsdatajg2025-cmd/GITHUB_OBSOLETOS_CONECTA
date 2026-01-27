@@ -6,10 +6,10 @@ import os
 import gspread
 import json
 import textwrap
-import time
+import urllib.parse
 from datetime import datetime, timedelta
 from oauth2client.service_account import ServiceAccountCredentials
-from concurrent.futures import ThreadPoolExecutor # Para ejecución rápida
+from concurrent.futures import ThreadPoolExecutor
 
 # --- CONFIGURACIÓN DE LIENZO ---
 ANCHO, ALTO = 2500, 3750
@@ -24,7 +24,7 @@ FONT_EXTRABOLD_COND = "Mark Simonson - Proxima Nova Alt Condensed Extrabold.otf"
 FONT_REGULAR_COND = "Mark Simonson - Proxima Nova Alt Condensed Regular.otf"
 FONT_EXTRABOLD = "Mark Simonson - Proxima Nova Extrabold.otf"
 FONT_SEMIBOLD = "Mark Simonson - Proxima Nova Semibold.otf"
-FONT_RUBIK = "Rubik-Medium.ttf"
+# FONT_RUBIK = "Rubik-Medium.ttf" # Si no la usas la puedes omitir, pero la dejo por si acaso
 
 # --- COLORES ---
 LC_AMARILLO = (255, 203, 5)
@@ -57,14 +57,8 @@ def descargar_imagen(url):
     except: return None
 
 def formatear_precio(valor):
-    # CORRECCIÓN: Si el valor es 1.539, el punto es de miles. 
-    # Primero quitamos el símbolo de moneda y espacios.
     s = str(valor).replace("S/.", "").replace("S/", "").replace(",", "").strip()
-    
-    # Si detectamos un punto, lo eliminamos (asumimos que en tu data actual son miles)
-    # Ejemplo: "1.539" -> "1539"
     s = s.replace(".", "")
-    
     if not s or s == "0" or s == "nan": return "0"
     return s
 
@@ -154,7 +148,7 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
         x, y = anchos[i%2], altos[i//2]
         draw.rounded_rectangle([x, y, x+1090, y+760], radius=70, fill=BLANCO)
         
-        img_p = descargar_imagen(prod['image_link'])
+        img_p = descargar_imagen(prod.get('image_link'))
         if img_p:
             img_p.thumbnail((520, 520))
             flyer.paste(img_p, (x+30, y + (760-img_p.height)//2), img_p)
@@ -182,7 +176,6 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
             draw.text((tx, ty), line, font=f_art_prod, fill=NEGRO)
             ty += f_size + 5
             
-        # BLOQUES DE PRECIO
         ty_b = y + 450
         p_val = formatear_precio(prod.get('Actualizacion Precios', 0))
         rec_color_p = EFE_AZUL if es_efe else LC_AMARILLO
@@ -207,7 +200,6 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
         draw.text((start_x_p, ty_b + 35), "S/ ", font=f_s, fill=BLANCO if es_efe else NEGRO)
         draw.text((start_x_p + draw.textlength("S/ ", font=f_s), ty_b + 10), p_val, font=f_p, fill=BLANCO if es_efe else NEGRO)
         
-        # SKU
         sku_val = str(prod['%Cod Articulo'])
         draw.rounded_rectangle([tx, ty_b + 140, tx+area_texto_w, ty_b + 220], radius=35, fill=rec_color_s)
         draw.rectangle([tx, ty_b + 140, tx+area_texto_w, ty_b + 175], fill=rec_color_s)
@@ -217,41 +209,52 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
     return flyer
 
 def procesar_tienda(nombre_tienda, grupo):
-    """Función para procesar una sola tienda (usada por multithreading)"""
     print(f"Procesando: {nombre_tienda}")
     paginas = []
     indices = grupo.index.tolist()
-    
-    # Generar flyers
     for i in range(0, len(indices), 6):
         bloque = grupo.iloc[i:i+6].to_dict('records')
         img_f = crear_flyer(bloque, str(nombre_tienda), (i//6)+1)
         paginas.append(img_f.convert("RGB"))
     
     if paginas:
-        t_clean = "".join(x for x in str(nombre_tienda) if x.isalnum())
+        t_clean = "".join(x for x in str(nombre_tienda) if x.isalnum() or x in " -_")
         pdf_fn = f"PDF_{t_clean}.pdf"
         pdf_path = os.path.join(output_dir, pdf_fn)
         paginas[0].save(pdf_path, save_all=True, append_images=paginas[1:])
-        return [nombre_tienda, f"{URL_BASE_PAGES}{pdf_fn}"]
+        
+        # Encoding para links con tildes/ñ
+        pdf_fn_encoded = urllib.parse.quote(pdf_fn)
+        return [nombre_tienda, f"{URL_BASE_PAGES}{pdf_fn_encoded}"]
     return None
 
-# --- PROCESO PRINCIPAL ---
+# --- FLUJO PRINCIPAL ---
 ss = conectar_sheets()
-df = pd.DataFrame(ss.worksheet("Detalle de Inventario").get_all_records())
-grupos = df.groupby('Tienda Retail')
 
+print("Consolidando datos...")
+df_source = pd.DataFrame(ss.worksheet("Sheetgo_Detalle de Inventario").get_all_records())
+df_lookup = pd.DataFrame(ss.worksheet("listado_productos").get_all_records())
+
+# 1. Limpiar SKU (-EX) y Cruzar Datos (Simulando BUSCARV)
+df_source['sku_temp'] = df_source['%Cod Articulo'].astype(str).str.replace('-EX', '', case=False).str.strip()
+lookup_dict = df_lookup.set_index('sku')['base_image_path'].to_dict()
+df_source['image_link'] = df_source['sku_temp'].map(lookup_dict).fillna('')
+
+# 2. Actualizar hoja Detalle de Inventario
+ws_detalle = ss.worksheet("Detalle de Inventario")
+ws_detalle.clear()
+ws_detalle.update([df_source.columns.values.tolist()] + df_source.values.tolist())
+
+# 3. Procesar PDFs
+grupos = df_source.groupby('Tienda Retail')
 tienda_links_pdf = []
-
-# OPTIMIZACIÓN: Procesamos tiendas en paralelo (máximo 4 a la vez para no saturar memoria)
 with ThreadPoolExecutor(max_workers=4) as executor:
     futuros = [executor.submit(procesar_tienda, n, g) for n, g in grupos if str(n).strip()]
     for f in futuros:
-        resultado = f.result()
-        if resultado:
-            tienda_links_pdf.append(resultado)
+        res = f.result()
+        if res: tienda_links_pdf.append(res)
 
-# Actualizar Google Sheets con los links
+# 4. Actualizar FLYER_TIENDA
 try:
     hoja_pdf = ss.worksheet("FLYER_TIENDA")
 except:
@@ -259,4 +262,10 @@ except:
 
 hoja_pdf.clear()
 hoja_pdf.update('A1', [["TIENDA RETAIL", "LINK PDF FLYERS"]] + tienda_links_pdf)
+
+# 5. Ocultar hojas para Gerencia
+print("Ocultando pestañas técnicas...")
+for ws in ss.worksheets():
+    ws.update_properties({'hidden': ws.title != "FLYER_TIENDA"})
+
 print("¡Todo listo en tiempo record!")
