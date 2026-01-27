@@ -24,7 +24,6 @@ FONT_EXTRABOLD_COND = "Mark Simonson - Proxima Nova Alt Condensed Extrabold.otf"
 FONT_REGULAR_COND = "Mark Simonson - Proxima Nova Alt Condensed Regular.otf"
 FONT_EXTRABOLD = "Mark Simonson - Proxima Nova Extrabold.otf"
 FONT_SEMIBOLD = "Mark Simonson - Proxima Nova Semibold.otf"
-# FONT_RUBIK = "Rubik-Medium.ttf" # Si no la usas la puedes omitir, pero la dejo por si acaso
 
 # --- COLORES ---
 LC_AMARILLO = (255, 203, 5)
@@ -218,12 +217,13 @@ def procesar_tienda(nombre_tienda, grupo):
         paginas.append(img_f.convert("RGB"))
     
     if paginas:
+        # Limpiamos nombre del archivo de tildes/ñ para el sistema de archivos
         t_clean = "".join(x for x in str(nombre_tienda) if x.isalnum() or x in " -_")
         pdf_fn = f"PDF_{t_clean}.pdf"
         pdf_path = os.path.join(output_dir, pdf_fn)
         paginas[0].save(pdf_path, save_all=True, append_images=paginas[1:])
         
-        # Encoding para links con tildes/ñ
+        # Encoding para links (evita 404 por ñ o tildes en la URL)
         pdf_fn_encoded = urllib.parse.quote(pdf_fn)
         return [nombre_tienda, f"{URL_BASE_PAGES}{pdf_fn_encoded}"]
     return None
