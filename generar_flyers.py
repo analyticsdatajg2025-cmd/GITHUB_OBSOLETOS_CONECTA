@@ -71,7 +71,7 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
     flyer = Image.new('RGB', (ANCHO, ALTO), color=color_fondo)
     draw = ImageDraw.Draw(flyer)
     
-    # 1. CABECERA
+    # Cabecera
     header_h = 1000
     try:
         bg = Image.open(tienda_bg_path).convert("RGBA")
@@ -81,7 +81,7 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
         flyer.paste(bg, (0, 0))
     except: pass
 
-    # 2. LOGO
+    # Logo
     try:
         logo = Image.open(logo_path).convert("RGBA")
         if es_efe:
@@ -106,7 +106,7 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
             flyer.paste(logo, (lx, ly), logo)
     except: pass
 
-    # 3. NOMBRE TIENDA
+    # Nombre Tienda
     f_tienda = ImageFont.truetype(FONT_EXTRABOLD_COND, 90)
     txt_tienda = tienda_nombre.upper()
     tw_t = draw.textlength(txt_tienda, font=f_tienda)
@@ -121,7 +121,7 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
         draw.polygon(points, fill=NEGRO)
         draw.text((ANCHO - tw_t - 100, 570), txt_tienda, font=f_tienda, fill=LC_AMARILLO)
 
-    # 4. FECHA GENERADO
+    # Fecha
     f_fecha = ImageFont.truetype(FONT_BOLD_COND, 45)
     txt_gen = f"Generado: {fecha_peru}"
     tw_g = draw.textlength(txt_gen, font=f_fecha)
@@ -129,14 +129,14 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
     draw.rectangle([0, 850, 50, 960], fill=BLANCO)
     draw.text((40, 880), txt_gen, font=f_fecha, fill=NEGRO)
 
-    # 5. SLOGAN
+    # Slogan
     f_slogan = ImageFont.truetype(FONT_EXTRABOLD, 105)
     slogan_txt = "¡APROVECHA ESTAS INCREÍBLES OFERTAS!"
     sw = draw.textlength(slogan_txt, font=f_slogan)
     draw.rectangle([0, 1030, ANCHO, 1260], fill=color_slogan_bg)
     draw.text(((ANCHO-sw)//2, 1085), slogan_txt, font=f_slogan, fill=BLANCO if es_efe else NEGRO)
 
-    # 6. PRODUCTOS
+    # Bloques de Productos
     anchos = [110, 1300]
     altos = [1350, 2150, 2950] 
     f_marca_prod = ImageFont.truetype(FONT_SEMIBOLD, 50)
@@ -234,13 +234,17 @@ df_source = pd.DataFrame(ss.worksheet("Sheetgo_Detalle de Inventario").get_all_r
 df_lookup = pd.DataFrame(ss.worksheet("listado_productos").get_all_records())
 
 # 1. Limpiar SKU (-EX) y Cruzar Datos
-df_source['sku_temp'] = df_source['%Cod Articulo'].astype(str).str.replace('-EX', '', case=False).str.strip()
-lookup_dict = df_lookup.set_index('sku')['base_image_path'].to_dict()
-df_source['image_link'] = df_source['sku_temp'].map(lookup_dict).fillna('')
+# CORRECCIÓN: Limpiamos directamente la columna original '%Cod Articulo'
+df_source['%Cod Articulo'] = df_source['%Cod Articulo'].astype(str).str.replace('-EX', '', case=False).str.strip()
 
-# 2. Actualizar hoja Detalle de Inventario (Corregido para evitar advertencias)
+# Usamos la columna ya limpia para buscar el link de imagen
+lookup_dict = df_lookup.set_index('sku')['base_image_path'].to_dict()
+df_source['image_link'] = df_source['%Cod Articulo'].map(lookup_dict).fillna('')
+
+# 2. Actualizar hoja Detalle de Inventario
 ws_detalle = ss.worksheet("Detalle de Inventario")
 ws_detalle.clear()
+# Al exportar el DataFrame, la columna '%Cod Articulo' ya irá sin el -EX
 ws_detalle.update(values=[df_source.columns.values.tolist()] + df_source.values.tolist(), range_name='A1')
 
 # 3. Procesar PDFs
@@ -252,7 +256,7 @@ with ThreadPoolExecutor(max_workers=4) as executor:
         res = f.result()
         if res: tienda_links_pdf.append(res)
 
-# 4. Actualizar FLYER_TIENDA (Corregido para evitar advertencias)
+# 4. Actualizar FLYER_TIENDA
 try:
     hoja_pdf = ss.worksheet("FLYER_TIENDA")
 except:
@@ -262,7 +266,7 @@ hoja_pdf.clear()
 datos_pdf = [["TIENDA RETAIL", "LINK PDF FLYERS"]] + tienda_links_pdf
 hoja_pdf.update(values=datos_pdf, range_name='A1')
 
-# 5. Ocultar hojas para Gerencia (METODO CORRECTO)
+# 5. Ocultar hojas para Gerencia
 print("Ajustando visibilidad de pestañas...")
 requests_list = []
 hojas_visibles = ["FLYER_TIENDA", "Sheetgo_Detalle de Inventario"]
