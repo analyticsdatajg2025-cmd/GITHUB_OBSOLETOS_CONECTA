@@ -282,7 +282,7 @@ for ws in ss.worksheets():
             "fields": "hidden"
         }
     })
-
+ 
 if requests_list:
     ss.batch_update({"requests": requests_list})
 
