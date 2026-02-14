@@ -38,7 +38,8 @@ GRIS_MARCA = (100, 100, 100)
 output_dir = "docs/flyers"
 os.makedirs(output_dir, exist_ok=True)
 
-fecha_peru = (datetime.utcnow() - timedelta(hours=5)).strftime("%d/%m/%Y %I:%M %p")
+ahora_peru = datetime.utcnow() - timedelta(hours=5)
+fecha_peru = ahora_peru.strftime("%d/%m/%Y %I:%M %p")
 
 def conectar_sheets():
     info_creds = json.loads(os.environ['GOOGLE_SHEETS_JSON'])
@@ -66,6 +67,7 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
     color_fondo = EFE_AZUL_OSCURO if es_efe else LC_AMARILLO_OSCURO
     color_slogan_bg = EFE_AZUL if es_efe else LC_AMARILLO
     logo_path = "logo-efe-sin-fondo.png" if es_efe else "logo-lc-sin-fondo.png"
+    tag_top_path = "tag-top-efe.png" if es_efe else "tag-top-lc.png"
     tienda_bg_path = "efe tienda.jpg" if es_efe else "LC-MIRAFLORES-LOGO-3D[2].jpg"
     
     flyer = Image.new('RGB', (ANCHO, ALTO), color=color_fondo)
@@ -151,6 +153,15 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
         if img_p:
             img_p.thumbnail((520, 520))
             flyer.paste(img_p, (x+30, y + (760-img_p.height)//2), img_p)
+
+        # IMPLEMENTACIÓN TOP 10: Pegar distintivo si corresponde
+        if prod.get('es_top10', False):
+            try:
+                tag_top = Image.open(tag_top_path).convert("RGBA")
+                tag_top.thumbnail((260, 260))
+                # Pegar en la esquina superior izquierda de la tarjeta blanca
+                flyer.paste(tag_top, (x - 10, y - 10), tag_top)
+            except: pass
             
         tx = x + 570
         area_texto_w = 480 
@@ -210,9 +221,12 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
 def procesar_tienda(nombre_tienda, grupo):
     print(f"Procesando: {nombre_tienda}")
     paginas = []
-    indices = grupo.index.tolist()
+    # PRIORIZACIÓN: Ordenar para que los es_top10=True vayan primero
+    grupo_priorizado = grupo.sort_values(by='es_top10', ascending=False)
+    
+    indices = grupo_priorizado.index.tolist()
     for i in range(0, len(indices), 6):
-        bloque = grupo.iloc[i:i+6].to_dict('records')
+        bloque = grupo_priorizado.iloc[i:i+6].to_dict('records')
         img_f = crear_flyer(bloque, str(nombre_tienda), (i//6)+1)
         paginas.append(img_f.convert("RGB"))
     
@@ -233,21 +247,33 @@ print("Consolidando datos...")
 df_source = pd.DataFrame(ss.worksheet("Sheetgo_Detalle de Inventario").get_all_records())
 df_lookup = pd.DataFrame(ss.worksheet("listado_productos").get_all_records())
 
-# 1. Limpiar SKU (-EX) y Cruzar Datos
-# CORRECCIÓN: Limpiamos directamente la columna original '%Cod Articulo'
-df_source['%Cod Articulo'] = df_source['%Cod Articulo'].astype(str).str.replace('-EX', '', case=False).str.strip()
+# CARGAR TOP 10 Y VALIDAR VIGENCIA
+try:
+    df_top10 = pd.DataFrame(ss.worksheet("Sheetgo_Top10 Obsoletos").get_all_records())
+    # Convertir fin de vigencia a datetime para comparar
+    df_top10['Fin de vigencia'] = pd.to_datetime(df_top10['Fin de vigencia'], dayfirst=True)
+    # Filtrar solo los que aún no vencen (hoy es menor o igual a fecha fin)
+    hoy = ahora_peru.replace(hour=0, minute=0, second=0, microsecond=0)
+    lista_skus_top = df_top10[df_top10['Fin de vigencia'] >= hoy]['SKU'].astype(str).str.strip().tolist()
+    print(f"Top 10 vigentes cargados: {len(lista_skus_top)}")
+except Exception as e:
+    print(f"Aviso: No se pudo procesar la hoja de Top 10 ({e}).")
+    lista_skus_top = []
 
-# Usamos la columna ya limpia para buscar el link de imagen
+# Limpiar SKU y Cruzar con Imágenes
+df_source['%Cod Articulo'] = df_source['%Cod Articulo'].astype(str).str.replace('-EX', '', case=False).str.strip()
 lookup_dict = df_lookup.set_index('sku')['base_image_path'].to_dict()
 df_source['image_link'] = df_source['%Cod Articulo'].map(lookup_dict).fillna('')
 
-# 2. Actualizar hoja Detalle de Inventario
+# MARCAR PRODUCTOS COMO TOP 10
+df_source['es_top10'] = df_source['%Cod Articulo'].isin(lista_skus_top)
+
+# Actualizar hoja Detalle de Inventario
 ws_detalle = ss.worksheet("Detalle de Inventario")
 ws_detalle.clear()
-# Al exportar el DataFrame, la columna '%Cod Articulo' ya irá sin el -EX
 ws_detalle.update(values=[df_source.columns.values.tolist()] + df_source.values.tolist(), range_name='A1')
 
-# 3. Procesar PDFs
+# Procesar PDFs
 grupos = df_source.groupby('Tienda Retail')
 tienda_links_pdf = []
 with ThreadPoolExecutor(max_workers=4) as executor:
@@ -256,7 +282,7 @@ with ThreadPoolExecutor(max_workers=4) as executor:
         res = f.result()
         if res: tienda_links_pdf.append(res)
 
-# 4. Actualizar FLYER_TIENDA
+# Actualizar FLYER_TIENDA
 try:
     hoja_pdf = ss.worksheet("FLYER_TIENDA")
 except:
@@ -266,10 +292,10 @@ hoja_pdf.clear()
 datos_pdf = [["TIENDA RETAIL", "LINK PDF FLYERS"]] + tienda_links_pdf
 hoja_pdf.update(values=datos_pdf, range_name='A1')
 
-# 5. Ocultar hojas para Gerencia
+# Ocultar hojas para Gerencia
 print("Ajustando visibilidad de pestañas...")
 requests_list = []
-hojas_visibles = ["FLYER_TIENDA", "Sheetgo_Detalle de Inventario"]
+hojas_visibles = ["FLYER_TIENDA", "Sheetgo_Detalle de Inventario", "Sheetgo_Top10 Obsoletos"]
 
 for ws in ss.worksheets():
     should_hide = ws.title not in hojas_visibles
