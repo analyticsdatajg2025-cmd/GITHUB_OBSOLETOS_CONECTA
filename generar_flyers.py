@@ -281,7 +281,7 @@ grupos = df_source.groupby('Tienda Retail')
 tienda_links_pdf = []
 with ThreadPoolExecutor(max_workers=4) as executor:
     futuros = [executor.submit(procesar_tienda, n, g) for n, g in grupos if str(n).strip()]
-    for f in futures:
+    for f in futuros:
         res = f.result()
         if res: tienda_links_pdf.append(res)
 
