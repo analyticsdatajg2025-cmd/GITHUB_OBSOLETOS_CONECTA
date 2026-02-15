@@ -38,6 +38,7 @@ GRIS_MARCA = (100, 100, 100)
 output_dir = "docs/flyers"
 os.makedirs(output_dir, exist_ok=True)
 
+# Fecha Perú para reportes y validación
 ahora_peru = datetime.utcnow() - timedelta(hours=5)
 fecha_peru = ahora_peru.strftime("%d/%m/%Y %I:%M %p")
 
@@ -83,7 +84,7 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
         flyer.paste(bg, (0, 0))
     except: pass
 
-    # Logo
+    # Logo Corporativo
     try:
         logo = Image.open(logo_path).convert("RGBA")
         if es_efe:
@@ -123,7 +124,7 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
         draw.polygon(points, fill=NEGRO)
         draw.text((ANCHO - tw_t - 100, 570), txt_tienda, font=f_tienda, fill=LC_AMARILLO)
 
-    # Fecha
+    # Fecha Generación
     f_fecha = ImageFont.truetype(FONT_BOLD_COND, 45)
     txt_gen = f"Generado: {fecha_peru}"
     tw_g = draw.textlength(txt_gen, font=f_fecha)
@@ -154,13 +155,13 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
             img_p.thumbnail((520, 520))
             flyer.paste(img_p, (x+30, y + (760-img_p.height)//2), img_p)
 
-        # IMPLEMENTACIÓN TOP 10: Pegar distintivo si corresponde
+        # AJUSTE: Pegar distintivo TOP (Avanzado a la derecha y abajo)
         if prod.get('es_top10', False):
             try:
                 tag_top = Image.open(tag_top_path).convert("RGBA")
                 tag_top.thumbnail((260, 260))
-                # Pegar en la esquina superior izquierda de la tarjeta blanca
-                flyer.paste(tag_top, (x - 10, y - 10), tag_top)
+                # Coordenada ajustada: x+20, y+20 para mejor entrada visual
+                flyer.paste(tag_top, (x + 20, y + 20), tag_top)
             except: pass
             
         tx = x + 570
@@ -219,9 +220,9 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
     return flyer
 
 def procesar_tienda(nombre_tienda, grupo):
-    print(f"Procesando: {nombre_tienda}")
+    print(f"Generando PDF: {nombre_tienda}")
     paginas = []
-    # PRIORIZACIÓN: Ordenar para que los es_top10=True vayan primero
+    # PRIORIZACIÓN: Los productos marcados como es_top10 van primero en la lista
     grupo_priorizado = grupo.sort_values(by='es_top10', ascending=False)
     
     indices = grupo_priorizado.index.tolist()
@@ -243,29 +244,31 @@ def procesar_tienda(nombre_tienda, grupo):
 # --- FLUJO PRINCIPAL ---
 ss = conectar_sheets()
 
-print("Consolidando datos...")
+print("Descargando datos y cruzando Top 10...")
 df_source = pd.DataFrame(ss.worksheet("Sheetgo_Detalle de Inventario").get_all_records())
 df_lookup = pd.DataFrame(ss.worksheet("listado_productos").get_all_records())
 
-# CARGAR TOP 10 Y VALIDAR VIGENCIA
+# CARGAR TOP 10 Y APLICAR LIMPIEZA DE SKU (-EX)
 try:
     df_top10 = pd.DataFrame(ss.worksheet("Sheetgo_Top10 Obsoletos").get_all_records())
-    # Convertir fin de vigencia a datetime para comparar
+    # AJUSTE: Limpiamos SKU del Top 10 también para que coincida con el inventario
+    df_top10['SKU'] = df_top10['SKU'].astype(str).str.replace('-EX', '', case=False).str.strip()
+    
+    # Validar Vigencia
     df_top10['Fin de vigencia'] = pd.to_datetime(df_top10['Fin de vigencia'], dayfirst=True)
-    # Filtrar solo los que aún no vencen (hoy es menor o igual a fecha fin)
     hoy = ahora_peru.replace(hour=0, minute=0, second=0, microsecond=0)
-    lista_skus_top = df_top10[df_top10['Fin de vigencia'] >= hoy]['SKU'].astype(str).str.strip().tolist()
-    print(f"Top 10 vigentes cargados: {len(lista_skus_top)}")
+    lista_skus_top = df_top10[df_top10['Fin de vigencia'] >= hoy]['SKU'].tolist()
+    print(f"Top 10 vigentes cargados (limpios): {len(lista_skus_top)}")
 except Exception as e:
-    print(f"Aviso: No se pudo procesar la hoja de Top 10 ({e}).")
+    print(f"Aviso: Error procesando Top 10 ({e}).")
     lista_skus_top = []
 
-# Limpiar SKU y Cruzar con Imágenes
+# Limpiar SKU original y Cruzar con Imágenes
 df_source['%Cod Articulo'] = df_source['%Cod Articulo'].astype(str).str.replace('-EX', '', case=False).str.strip()
 lookup_dict = df_lookup.set_index('sku')['base_image_path'].to_dict()
 df_source['image_link'] = df_source['%Cod Articulo'].map(lookup_dict).fillna('')
 
-# MARCAR PRODUCTOS COMO TOP 10
+# MARCAR PRODUCTOS TOP 10 (Comparación exacta limpia)
 df_source['es_top10'] = df_source['%Cod Articulo'].isin(lista_skus_top)
 
 # Actualizar hoja Detalle de Inventario
@@ -273,16 +276,16 @@ ws_detalle = ss.worksheet("Detalle de Inventario")
 ws_detalle.clear()
 ws_detalle.update(values=[df_source.columns.values.tolist()] + df_source.values.tolist(), range_name='A1')
 
-# Procesar PDFs
+# Generar PDFs por tienda
 grupos = df_source.groupby('Tienda Retail')
 tienda_links_pdf = []
 with ThreadPoolExecutor(max_workers=4) as executor:
     futuros = [executor.submit(procesar_tienda, n, g) for n, g in grupos if str(n).strip()]
-    for f in futuros:
+    for f in futures:
         res = f.result()
         if res: tienda_links_pdf.append(res)
 
-# Actualizar FLYER_TIENDA
+# Actualizar Tabla Maestra de Flyers
 try:
     hoja_pdf = ss.worksheet("FLYER_TIENDA")
 except:
@@ -292,24 +295,17 @@ hoja_pdf.clear()
 datos_pdf = [["TIENDA RETAIL", "LINK PDF FLYERS"]] + tienda_links_pdf
 hoja_pdf.update(values=datos_pdf, range_name='A1')
 
-# Ocultar hojas para Gerencia
-print("Ajustando visibilidad de pestañas...")
-requests_list = []
+# Visibilidad de pestañas
+print("Configurando visibilidad de hojas...")
 hojas_visibles = ["FLYER_TIENDA", "Sheetgo_Detalle de Inventario", "Sheetgo_Top10 Obsoletos"]
-
+requests_list = []
 for ws in ss.worksheets():
-    should_hide = ws.title not in hojas_visibles
     requests_list.append({
         "updateSheetProperties": {
-            "properties": {
-                "sheetId": ws.id,
-                "hidden": should_hide
-            },
+            "properties": {"sheetId": ws.id, "hidden": ws.title not in hojas_visibles},
             "fields": "hidden"
         }
     })
- 
-if requests_list:
-    ss.batch_update({"requests": requests_list})
+ss.batch_update({"requests": requests_list})
 
-print("¡Todo listo en tiempo record!")
+print("¡Proceso exitoso!")
