@@ -7,6 +7,7 @@ import gspread
 import json
 import textwrap
 import urllib.parse
+import time
 from datetime import datetime, timedelta
 from oauth2client.service_account import ServiceAccountCredentials
 from concurrent.futures import ThreadPoolExecutor
@@ -38,7 +39,6 @@ GRIS_MARCA = (100, 100, 100)
 output_dir = "docs/flyers"
 os.makedirs(output_dir, exist_ok=True)
 
-# Fecha Perú para reportes y validación
 ahora_peru = datetime.utcnow() - timedelta(hours=5)
 fecha_peru = ahora_peru.strftime("%d/%m/%Y %I:%M %p")
 
@@ -74,7 +74,6 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
     flyer = Image.new('RGB', (ANCHO, ALTO), color=color_fondo)
     draw = ImageDraw.Draw(flyer)
     
-    # Cabecera
     header_h = 1000
     try:
         bg = Image.open(tienda_bg_path).convert("RGBA")
@@ -84,7 +83,6 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
         flyer.paste(bg, (0, 0))
     except: pass
 
-    # Logo Corporativo
     try:
         logo = Image.open(logo_path).convert("RGBA")
         if es_efe:
@@ -109,7 +107,6 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
             flyer.paste(logo, (lx, ly), logo)
     except: pass
 
-    # Nombre Tienda
     f_tienda = ImageFont.truetype(FONT_EXTRABOLD_COND, 90)
     txt_tienda = tienda_nombre.upper()
     tw_t = draw.textlength(txt_tienda, font=f_tienda)
@@ -124,7 +121,6 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
         draw.polygon(points, fill=NEGRO)
         draw.text((ANCHO - tw_t - 100, 570), txt_tienda, font=f_tienda, fill=LC_AMARILLO)
 
-    # Fecha Generación
     f_fecha = ImageFont.truetype(FONT_BOLD_COND, 45)
     txt_gen = f"Generado: {fecha_peru}"
     tw_g = draw.textlength(txt_gen, font=f_fecha)
@@ -132,14 +128,12 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
     draw.rectangle([0, 850, 50, 960], fill=BLANCO)
     draw.text((40, 880), txt_gen, font=f_fecha, fill=NEGRO)
 
-    # Slogan
     f_slogan = ImageFont.truetype(FONT_EXTRABOLD, 105)
     slogan_txt = "¡APROVECHA ESTAS INCREÍBLES OFERTAS!"
     sw = draw.textlength(slogan_txt, font=f_slogan)
     draw.rectangle([0, 1030, ANCHO, 1260], fill=color_slogan_bg)
     draw.text(((ANCHO-sw)//2, 1085), slogan_txt, font=f_slogan, fill=BLANCO if es_efe else NEGRO)
 
-    # Bloques de Productos
     anchos = [110, 1300]
     altos = [1350, 2150, 2950] 
     f_marca_prod = ImageFont.truetype(FONT_SEMIBOLD, 50)
@@ -155,7 +149,6 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
             img_p.thumbnail((520, 520))
             flyer.paste(img_p, (x+30, y + (760-img_p.height)//2), img_p)
 
-        # AJUSTE: Pegar distintivo TOP (Avanzado a la derecha y abajo)
         if prod.get('es_top10', False):
             try:
                 tag_top = Image.open(tag_top_path).convert("RGBA")
@@ -222,7 +215,6 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
 def procesar_tienda(nombre_tienda, grupo):
     print(f"Generando PDF: {nombre_tienda}")
     paginas = []
-    # PRIORIZACIÓN: Los productos marcados como es_top10 van primero en la lista
     grupo_priorizado = grupo.sort_values(by='es_top10', ascending=False)
     
     indices = grupo_priorizado.index.tolist()
@@ -251,24 +243,20 @@ df_lookup = pd.DataFrame(ss.worksheet("listado_productos").get_all_records())
 # CARGAR TOP 10 Y APLICAR LIMPIEZA DE SKU (-EX)
 try:
     df_top10 = pd.DataFrame(ss.worksheet("Sheetgo_Top10 Obsoletos").get_all_records())
-    # AJUSTE: Limpiamos SKU del Top 10 también para que coincida con el inventario
     df_top10['SKU'] = df_top10['SKU'].astype(str).str.replace('-EX', '', case=False).str.strip()
     
-    # Validar Vigencia
     df_top10['Fin de vigencia'] = pd.to_datetime(df_top10['Fin de vigencia'], dayfirst=True)
     hoy = ahora_peru.replace(hour=0, minute=0, second=0, microsecond=0)
     lista_skus_top = df_top10[df_top10['Fin de vigencia'] >= hoy]['SKU'].tolist()
-    print(f"Top 10 vigentes cargados (limpios): {len(lista_skus_top)}")
+    print(f"Top 10 vigentes cargados: {len(lista_skus_top)}")
 except Exception as e:
     print(f"Aviso: Error procesando Top 10 ({e}).")
     lista_skus_top = []
 
-# Limpiar SKU original y Cruzar con Imágenes
 df_source['%Cod Articulo'] = df_source['%Cod Articulo'].astype(str).str.replace('-EX', '', case=False).str.strip()
 lookup_dict = df_lookup.set_index('sku')['base_image_path'].to_dict()
 df_source['image_link'] = df_source['%Cod Articulo'].map(lookup_dict).fillna('')
 
-# MARCAR PRODUCTOS TOP 10 (Comparación exacta limpia)
 df_source['es_top10'] = df_source['%Cod Articulo'].isin(lista_skus_top)
 
 # Actualizar hoja Detalle de Inventario
@@ -276,7 +264,7 @@ ws_detalle = ss.worksheet("Detalle de Inventario")
 ws_detalle.clear()
 ws_detalle.update(values=[df_source.columns.values.tolist()] + df_source.values.tolist(), range_name='A1')
 
-# Generar PDFs por tienda
+# Generar PDFs
 grupos = df_source.groupby('Tienda Retail')
 tienda_links_pdf = []
 with ThreadPoolExecutor(max_workers=4) as executor:
@@ -285,27 +273,32 @@ with ThreadPoolExecutor(max_workers=4) as executor:
         res = f.result()
         if res: tienda_links_pdf.append(res)
 
-# Actualizar Tabla Maestra de Flyers
+# REFUERZO: Pequeña pausa para no saturar la API antes del paso final
+time.sleep(3)
+
+# Actualizar Tabla Maestra
 try:
     hoja_pdf = ss.worksheet("FLYER_TIENDA")
 except:
     hoja_pdf = ss.add_worksheet(title="FLYER_TIENDA", rows="100", cols="2")
 
 hoja_pdf.clear()
-datos_pdf = [["TIENDA RETAIL", "LINK PDF FLYERS"]] + tienda_links_pdf
-hoja_pdf.update(values=datos_pdf, range_name='A1')
+hoja_pdf.update(values=[["TIENDA RETAIL", "LINK PDF FLYERS"]] + tienda_links_pdf, range_name='A1')
 
-# Visibilidad de pestañas
+# REFUERZO: Visibilidad de pestañas con Try-Except para evitar paros por Error 500
 print("Configurando visibilidad de hojas...")
-hojas_visibles = ["FLYER_TIENDA", "Sheetgo_Detalle de Inventario", "Sheetgo_Top10 Obsoletos"]
-requests_list = []
-for ws in ss.worksheets():
-    requests_list.append({
-        "updateSheetProperties": {
-            "properties": {"sheetId": ws.id, "hidden": ws.title not in hojas_visibles},
-            "fields": "hidden"
-        }
-    })
-ss.batch_update({"requests": requests_list})
+try:
+    hojas_visibles = ["FLYER_TIENDA", "Sheetgo_Detalle de Inventario", "Sheetgo_Top10 Obsoletos"]
+    requests_list = []
+    for ws in ss.worksheets():
+        requests_list.append({
+            "updateSheetProperties": {
+                "properties": {"sheetId": ws.id, "hidden": ws.title not in hojas_visibles},
+                "fields": "hidden"
+            }
+        })
+    ss.batch_update({"requests": requests_list})
+except Exception as e:
+    print(f"Aviso: No se pudo actualizar la visibilidad de las hojas ({e}), pero el proceso continuará.")
 
 print("¡Proceso exitoso!")
