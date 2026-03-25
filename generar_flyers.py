@@ -267,7 +267,7 @@ ws_detalle.update(values=[df_source.columns.values.tolist()] + df_source.values.
 # Generar PDFs
 grupos = df_source.groupby('Tienda Retail')
 tienda_links_pdf = []
-with ThreadPoolExecutor(max_workers=4) as executor:
+with ThreadPoolExecutor(max_workers=2) as executor:
     futuros = [executor.submit(procesar_tienda, n, g) for n, g in grupos if str(n).strip()]
     for f in futuros:
         res = f.result()
