@@ -43,6 +43,17 @@ os.makedirs(output_dir, exist_ok=True)
 
 ahora_peru = datetime.utcnow() - timedelta(hours=5)
 fecha_peru = ahora_peru.strftime("%d/%m/%Y %I:%M %p")
+VERSION_LINK = ahora_peru.strftime("%Y%m%d%H%M")
+
+def parsear_fecha(valor):
+    # Acepta "30/11/2026", "2026-11-30", "30/11/2026 00:00:00" o el número de serie de Sheets (46356)
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        return pd.Timestamp("1899-12-30") + pd.Timedelta(days=float(valor))
+    s = str(valor).strip()
+    if not s: return pd.NaT
+    if len(s) >= 10 and s[4] == "-":
+        return pd.to_datetime(s[:10], format="%Y-%m-%d", errors="coerce")
+    return pd.to_datetime(s.split(" ")[0], dayfirst=True, errors="coerce")
 
 def conectar_sheets():
     info_creds = json.loads(os.environ['GOOGLE_SHEETS_JSON'])
@@ -65,7 +76,8 @@ def formatear_precio(valor):
     if isinstance(valor, (int, float)) and not isinstance(valor, bool):
         num = float(valor)
     else:
-        s = str(valor).replace("S/.", "").replace("S/", "").replace(" ", "").strip()
+        original = str(valor).strip()
+        s = original.replace("S/.", "").replace("S/", "").replace(" ", "").strip()
         if not s or s.lower() == "nan": return "0"
         if "," in s and "." in s:
             # El separador que aparece al final es el decimal
@@ -79,7 +91,7 @@ def formatear_precio(valor):
         try:
             num = float(s)
         except ValueError:
-            return s
+            return original  # Textos como "PRECIO DE CAJA" se muestran tal cual
     if num != num or num == 0: return "0"
     if num == int(num): return str(int(num))
     return f"{num:.2f}"
@@ -213,7 +225,7 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
         f_p = ImageFont.truetype(FONT_EXTRABOLD, p_f_size)
         f_s = ImageFont.truetype(FONT_REGULAR_COND, s_f_size)
         
-        while (draw.textlength("S/ ", font=f_s) + draw.textlength(p_val, font=f_p)) > (area_texto_w - 25):
+        while p_f_size > 30 and (draw.textlength("S/ ", font=f_s) + draw.textlength(p_val, font=f_p)) > (area_texto_w - 25):
             p_f_size -= 8
             s_f_size -= 4
             f_p = ImageFont.truetype(FONT_EXTRABOLD, p_f_size)
@@ -253,7 +265,8 @@ def procesar_tienda(nombre_tienda, grupo):
         for p in paginas: p.close()
         
         pdf_fn_encoded = urllib.parse.quote(pdf_fn)
-        return [nombre_tienda, f"{URL_BASE_PAGES}{pdf_fn_encoded}"]
+        # ?v=fecha obliga al navegador a bajar la versión nueva y no la guardada en caché
+        return [nombre_tienda, f"{URL_BASE_PAGES}{pdf_fn_encoded}?v={VERSION_LINK}"]
     return None
 
 # --- FLUJO PRINCIPAL ---
@@ -268,7 +281,10 @@ try:
     df_top10 = pd.DataFrame(ss.worksheet("Sheetgo_Top10 Obsoletos").get_all_records())
     df_top10['SKU'] = df_top10['SKU'].astype(str).str.replace('-EX', '', case=False).str.strip()
     
-    df_top10['Fin de vigencia'] = pd.to_datetime(df_top10['Fin de vigencia'], dayfirst=True)
+    print(f"Top 10 en el Sheet: {len(df_top10)} filas. Fechas leídas: {df_top10['Fin de vigencia'].astype(str).unique().tolist()[:5]}")
+    df_top10['Fin de vigencia'] = df_top10['Fin de vigencia'].apply(parsear_fecha)
+    if df_top10['Fin de vigencia'].isna().any():
+        print(f"Aviso: {df_top10['Fin de vigencia'].isna().sum()} fechas de 'Fin de vigencia' no se pudieron leer.")
     hoy = ahora_peru.replace(hour=0, minute=0, second=0, microsecond=0)
     lista_skus_top = df_top10[df_top10['Fin de vigencia'] >= hoy]['SKU'].tolist()
     print(f"Top 10 vigentes cargados: {len(lista_skus_top)}")
