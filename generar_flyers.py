@@ -36,6 +36,8 @@ BLANCO = (255, 255, 255)
 NEGRO = (0, 0, 0)
 GRIS_MARCA = (100, 100, 100)
 
+PDF_QUALITY = 70  # Calidad JPEG de las páginas del PDF
+
 output_dir = "docs/flyers"
 os.makedirs(output_dir, exist_ok=True)
 
@@ -58,10 +60,29 @@ def descargar_imagen(url):
     except: return None
 
 def formatear_precio(valor):
-    s = str(valor).replace("S/.", "").replace("S/", "").replace(",", "").strip()
-    s = s.replace(".", "")
-    if not s or s == "0" or s == "nan": return "0"
-    return s
+    # Acepta números (1299, 1299.9) y textos ("S/ 1,299.90", "1.299", "1.299,90").
+    # Antes se borraban todos los puntos, y 1299.90 se mostraba como 129990.
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        num = float(valor)
+    else:
+        s = str(valor).replace("S/.", "").replace("S/", "").replace(" ", "").strip()
+        if not s or s.lower() == "nan": return "0"
+        if "," in s and "." in s:
+            # El separador que aparece al final es el decimal
+            if s.rfind(",") > s.rfind("."): s = s.replace(".", "").replace(",", ".")
+            else: s = s.replace(",", "")
+        elif "," in s:
+            partes = s.split(",")
+            s = s.replace(",", "") if len(partes[-1]) == 3 else s.replace(",", ".")
+        elif s.count(".") > 1 or (s.count(".") == 1 and len(s.split(".")[-1]) == 3):
+            s = s.replace(".", "")  # "1.299" = mil doscientos noventa y nueve
+        try:
+            num = float(s)
+        except ValueError:
+            return s
+    if num != num or num == 0: return "0"
+    if num == int(num): return str(int(num))
+    return f"{num:.2f}"
 
 def crear_flyer(productos, tienda_nombre, flyer_count):
     es_efe = "EFE" in tienda_nombre.upper()
@@ -227,7 +248,9 @@ def procesar_tienda(nombre_tienda, grupo):
         t_clean = "".join(x for x in str(nombre_tienda) if x.isalnum() or x in " -_")
         pdf_fn = f"PDF_{t_clean}.pdf"
         pdf_path = os.path.join(output_dir, pdf_fn)
-        paginas[0].save(pdf_path, save_all=True, append_images=paginas[1:])
+        # quality=70 reduce el peso de los PDF: el sitio de Pages ya pesa ~724 MB y el límite es 1 GB
+        paginas[0].save(pdf_path, save_all=True, append_images=paginas[1:], quality=PDF_QUALITY, optimize=True)
+        for p in paginas: p.close()
         
         pdf_fn_encoded = urllib.parse.quote(pdf_fn)
         return [nombre_tienda, f"{URL_BASE_PAGES}{pdf_fn_encoded}"]
