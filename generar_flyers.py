@@ -8,6 +8,7 @@ import json
 import textwrap
 import urllib.parse
 import time
+from collections import Counter
 from datetime import datetime, timedelta
 from oauth2client.service_account import ServiceAccountCredentials
 from concurrent.futures import ThreadPoolExecutor
@@ -36,11 +37,24 @@ BLANCO = (255, 255, 255)
 NEGRO = (0, 0, 0)
 GRIS_MARCA = (100, 100, 100)
 
+PDF_QUALITY = 70  # Calidad JPEG de las páginas del PDF
+
 output_dir = "docs/flyers"
 os.makedirs(output_dir, exist_ok=True)
 
 ahora_peru = datetime.utcnow() - timedelta(hours=5)
 fecha_peru = ahora_peru.strftime("%d/%m/%Y %I:%M %p")
+VERSION_LINK = ahora_peru.strftime("%Y%m%d%H%M")
+
+def parsear_fecha(valor):
+    # Acepta "30/11/2026", "2026-11-30", "30/11/2026 00:00:00" o el número de serie de Sheets (46356)
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        return pd.Timestamp("1899-12-30") + pd.Timedelta(days=float(valor))
+    s = str(valor).strip()
+    if not s: return pd.NaT
+    if len(s) >= 10 and s[4] == "-":
+        return pd.to_datetime(s[:10], format="%Y-%m-%d", errors="coerce")
+    return pd.to_datetime(s.split(" ")[0], dayfirst=True, errors="coerce")
 
 def conectar_sheets():
     info_creds = json.loads(os.environ['GOOGLE_SHEETS_JSON'])
@@ -49,19 +63,75 @@ def conectar_sheets():
     client = gspread.authorize(creds)
     return client.open_by_key(SHEET_ID)
 
+# Caché de imágenes: cada URL se descarga una sola vez (antes se bajaba una vez por tienda)
+cache_imagenes = {}        # url -> bytes PNG de la miniatura, o None si falló
+fallos_imagenes = Counter() # motivo -> cantidad
+ejemplos_fallo = {}         # motivo -> una URL de ejemplo
+
+def _bajar_y_cachear(url):
+    motivo = None
+    for intento in range(3):
+        try:
+            res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            if res.status_code != 200:
+                motivo = f"HTTP {res.status_code}"
+                if res.status_code in (404, 410): break
+            else:
+                with Image.open(BytesIO(res.content)) as img:
+                    img = img.convert("RGBA")
+                    img.thumbnail((520, 520))
+                    buf = BytesIO(); img.save(buf, "PNG")
+                cache_imagenes[url] = buf.getvalue()
+                return
+        except Exception as e:
+            motivo = type(e).__name__
+        time.sleep(1 + intento)
+    cache_imagenes[url] = None
+    fallos_imagenes[motivo] += 1
+    ejemplos_fallo.setdefault(motivo, url)
+
+def precargar_imagenes(urls):
+    urls = [u for u in set(urls) if u]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(_bajar_y_cachear, urls))
+    ok = sum(1 for u in urls if cache_imagenes.get(u))
+    print(f"Imágenes: {ok}/{len(urls)} URLs únicas descargadas bien.")
+    for motivo, n in fallos_imagenes.most_common():
+        print(f"  Aviso: {n} imágenes fallaron por {motivo}. Ejemplo: {ejemplos_fallo[motivo]}")
+
 def descargar_imagen(url):
-    if not url or str(url).lower() == 'nan' or str(url).strip() == "": return None
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=10)
-        return Image.open(BytesIO(res.content)).convert("RGBA")
-    except: return None
+    data = cache_imagenes.get(url)
+    if not data: return None
+    return Image.open(BytesIO(data)).convert("RGBA")
+
+def normalizar_sku(serie):
+    return serie.astype(str).str.strip().str.upper().str.replace('-EX', '', regex=False)
 
 def formatear_precio(valor):
-    s = str(valor).replace("S/.", "").replace("S/", "").replace(",", "").strip()
-    s = s.replace(".", "")
-    if not s or s == "0" or s == "nan": return "0"
-    return s
+    # Acepta números (1299, 1299.9) y textos ("S/ 1,299.90", "1.299", "1.299,90").
+    # Antes se borraban todos los puntos, y 1299.90 se mostraba como 129990.
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        num = float(valor)
+    else:
+        original = str(valor).strip()
+        s = original.replace("S/.", "").replace("S/", "").replace(" ", "").strip()
+        if not s or s.lower() == "nan": return "0"
+        if "," in s and "." in s:
+            # El separador que aparece al final es el decimal
+            if s.rfind(",") > s.rfind("."): s = s.replace(".", "").replace(",", ".")
+            else: s = s.replace(",", "")
+        elif "," in s:
+            partes = s.split(",")
+            s = s.replace(",", "") if len(partes[-1]) == 3 else s.replace(",", ".")
+        elif s.count(".") > 1 or (s.count(".") == 1 and len(s.split(".")[-1]) == 3):
+            s = s.replace(".", "")  # "1.299" = mil doscientos noventa y nueve
+        try:
+            num = float(s)
+        except ValueError:
+            return original  # Textos como "PRECIO DE CAJA" se muestran tal cual
+    if num != num or num == 0: return "0"
+    if num == int(num): return str(int(num))
+    return f"{num:.2f}"
 
 def crear_flyer(productos, tienda_nombre, flyer_count):
     es_efe = "EFE" in tienda_nombre.upper()
@@ -192,7 +262,7 @@ def crear_flyer(productos, tienda_nombre, flyer_count):
         f_p = ImageFont.truetype(FONT_EXTRABOLD, p_f_size)
         f_s = ImageFont.truetype(FONT_REGULAR_COND, s_f_size)
         
-        while (draw.textlength("S/ ", font=f_s) + draw.textlength(p_val, font=f_p)) > (area_texto_w - 25):
+        while p_f_size > 30 and (draw.textlength("S/ ", font=f_s) + draw.textlength(p_val, font=f_p)) > (area_texto_w - 25):
             p_f_size -= 8
             s_f_size -= 4
             f_p = ImageFont.truetype(FONT_EXTRABOLD, p_f_size)
@@ -227,10 +297,13 @@ def procesar_tienda(nombre_tienda, grupo):
         t_clean = "".join(x for x in str(nombre_tienda) if x.isalnum() or x in " -_")
         pdf_fn = f"PDF_{t_clean}.pdf"
         pdf_path = os.path.join(output_dir, pdf_fn)
-        paginas[0].save(pdf_path, save_all=True, append_images=paginas[1:])
+        # quality=70 reduce el peso de los PDF: el sitio de Pages ya pesa ~724 MB y el límite es 1 GB
+        paginas[0].save(pdf_path, save_all=True, append_images=paginas[1:], quality=PDF_QUALITY, optimize=True)
+        for p in paginas: p.close()
         
         pdf_fn_encoded = urllib.parse.quote(pdf_fn)
-        return [nombre_tienda, f"{URL_BASE_PAGES}{pdf_fn_encoded}"]
+        # ?v=fecha obliga al navegador a bajar la versión nueva y no la guardada en caché
+        return [nombre_tienda, f"{URL_BASE_PAGES}{pdf_fn_encoded}?v={VERSION_LINK}"]
     return None
 
 # --- FLUJO PRINCIPAL ---
@@ -245,7 +318,10 @@ try:
     df_top10 = pd.DataFrame(ss.worksheet("Sheetgo_Top10 Obsoletos").get_all_records())
     df_top10['SKU'] = df_top10['SKU'].astype(str).str.replace('-EX', '', case=False).str.strip()
     
-    df_top10['Fin de vigencia'] = pd.to_datetime(df_top10['Fin de vigencia'], dayfirst=True)
+    print(f"Top 10 en el Sheet: {len(df_top10)} filas. Fechas leídas: {df_top10['Fin de vigencia'].astype(str).unique().tolist()[:5]}")
+    df_top10['Fin de vigencia'] = df_top10['Fin de vigencia'].apply(parsear_fecha)
+    if df_top10['Fin de vigencia'].isna().any():
+        print(f"Aviso: {df_top10['Fin de vigencia'].isna().sum()} fechas de 'Fin de vigencia' no se pudieron leer.")
     hoy = ahora_peru.replace(hour=0, minute=0, second=0, microsecond=0)
     lista_skus_top = df_top10[df_top10['Fin de vigencia'] >= hoy]['SKU'].tolist()
     print(f"Top 10 vigentes cargados: {len(lista_skus_top)}")
@@ -254,8 +330,18 @@ except Exception as e:
     lista_skus_top = []
 
 df_source['%Cod Articulo'] = df_source['%Cod Articulo'].astype(str).str.replace('-EX', '', case=False).str.strip()
-lookup_dict = df_lookup.set_index('sku')['base_image_path'].to_dict()
-df_source['image_link'] = df_source['%Cod Articulo'].map(lookup_dict).fillna('')
+# Cruce SKU -> imagen, sin importar mayúsculas, espacios ni el sufijo -EX
+df_lookup['sku_norm'] = normalizar_sku(df_lookup['sku'])
+df_lookup['base_image_path'] = df_lookup['base_image_path'].astype(str).str.strip()
+df_lookup = df_lookup[~df_lookup['base_image_path'].str.lower().isin(['', 'nan', 'none'])]
+lookup_dict = df_lookup.drop_duplicates('sku_norm').set_index('sku_norm')['base_image_path'].to_dict()
+df_source['image_link'] = normalizar_sku(df_source['%Cod Articulo']).map(lookup_dict).fillna('')
+con_link = (df_source['image_link'] != '').sum()
+print(f"listado_productos: {len(lookup_dict)} SKU con imagen. Productos del inventario con imagen asignada: {con_link}/{len(df_source)}")
+if con_link < len(df_source):
+    sin = df_source.loc[df_source['image_link'] == '', '%Cod Articulo'].unique()[:5].tolist()
+    print(f"  Ejemplos de SKU sin imagen en listado_productos: {sin}")
+precargar_imagenes(df_source['image_link'].tolist())
 
 df_source['es_top10'] = df_source['%Cod Articulo'].isin(lista_skus_top)
 

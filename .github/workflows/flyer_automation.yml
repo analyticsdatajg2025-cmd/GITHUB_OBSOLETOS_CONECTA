@@ -8,28 +8,38 @@ on:
   push:
     branches: [ main ]
 
+# Evita que dos ejecuciones (p. ej. push + programada) se pisen al escribir el Sheet y publicar Pages
+concurrency:
+  group: flyers-obsoletos
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: write
       pages: write
       id-token: write
+      actions: write # necesario para el paso "Mantener workflow activo"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configurar Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Instalar librerias
-        run: pip install pandas requests Pillow gspread oauth2client
+        # Versiones fijas para que una actualización de pandas/Pillow no rompa el proceso
+        run: pip install -r requirements.txt
 
       - name: Ejecutar Script de Flyers
         env:
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
+          PYTHONUNBUFFERED: 1
         run: python generar_flyers.py
 
       - name: Subir a GitHub Pages
@@ -39,3 +49,12 @@ jobs:
 
       - name: Desplegar
         uses: actions/deploy-pages@v4
+
+      - name: Mantener workflow activo
+        # GitHub desactiva los workflows programados tras 60 días sin commits.
+        # Re-habilitarlo en cada ejecución reinicia ese contador.
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable flyer_automation.yml --repo "${{ github.repository }}"
