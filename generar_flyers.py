@@ -38,6 +38,7 @@ NEGRO = (0, 0, 0)
 GRIS_MARCA = (100, 100, 100)
 
 PDF_QUALITY = 70  # Calidad JPEG de las páginas del PDF
+PDF_ANCHO = 1600  # Ancho final de cada página del PDF (px); suficiente para celular e impresión A4
 
 output_dir = "docs/flyers"
 os.makedirs(output_dir, exist_ok=True)
@@ -305,7 +306,10 @@ def procesar_tienda(nombre_tienda, grupo):
     for i in range(0, len(indices), 6):
         bloque = grupo_priorizado.iloc[i:i+6].to_dict('records')
         img_f = crear_flyer(bloque, str(nombre_tienda), (i//6)+1)
-        paginas.append(img_f.convert("RGB"))
+        # Se dibuja a 2500x3750 y se reduce a PDF_ANCHO: el sitio de Pages pesa menos y despliega más rápido
+        pagina = img_f.convert("RGB").resize((PDF_ANCHO, int(ALTO * PDF_ANCHO / ANCHO)), Image.Resampling.LANCZOS)
+        img_f.close()
+        paginas.append(pagina)
     
     if paginas:
         t_clean = "".join(x for x in str(nombre_tienda) if x.isalnum() or x in " -_")
