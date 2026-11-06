@@ -68,14 +68,21 @@ cache_imagenes = {}        # url -> bytes PNG de la miniatura, o None si falló
 fallos_imagenes = Counter() # motivo -> cantidad
 ejemplos_fallo = {}         # motivo -> una URL de ejemplo
 
+BLOQUEOS = (401, 403, 404, 410, 426, 429)  # respuestas que no mejoran reintentando
+corte_por_bloqueo = {"activo": False}
+
 def _bajar_y_cachear(url):
+    if corte_por_bloqueo["activo"]:
+        cache_imagenes[url] = None
+        fallos_imagenes["omitida (servidor bloqueando)"] += 1
+        return
     motivo = None
     for intento in range(3):
         try:
             res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
             if res.status_code != 200:
                 motivo = f"HTTP {res.status_code}"
-                if res.status_code in (404, 410): break
+                if res.status_code in BLOQUEOS: break
             else:
                 with Image.open(BytesIO(res.content)) as img:
                     img = img.convert("RGBA")
@@ -89,6 +96,10 @@ def _bajar_y_cachear(url):
     cache_imagenes[url] = None
     fallos_imagenes[motivo] += 1
     ejemplos_fallo.setdefault(motivo, url)
+    # Si las primeras 30 fallan todas por bloqueo del servidor, no insistir con el resto
+    intentadas = sum(fallos_imagenes.values()) + sum(1 for v in cache_imagenes.values() if v)
+    if intentadas >= 30 and not any(cache_imagenes.values()) and motivo in ("HTTP 426", "HTTP 403", "HTTP 429"):
+        corte_por_bloqueo["activo"] = True
 
 def precargar_imagenes(urls):
     urls = [u for u in set(urls) if u]
@@ -97,7 +108,10 @@ def precargar_imagenes(urls):
     ok = sum(1 for u in urls if cache_imagenes.get(u))
     print(f"Imágenes: {ok}/{len(urls)} URLs únicas descargadas bien.")
     for motivo, n in fallos_imagenes.most_common():
-        print(f"  Aviso: {n} imágenes fallaron por {motivo}. Ejemplo: {ejemplos_fallo[motivo]}")
+        print(f"  Aviso: {n} imágenes fallaron por {motivo}. Ejemplo: {ejemplos_fallo.get(motivo, '-')}")
+    if corte_por_bloqueo["activo"]:
+        print("  Aviso: el servidor de imágenes está BLOQUEANDO las descargas (WAF/CDN). "
+              "Los flyers salen sin imagen hasta que se permita el acceso desde GitHub Actions.")
 
 def descargar_imagen(url):
     data = cache_imagenes.get(url)
