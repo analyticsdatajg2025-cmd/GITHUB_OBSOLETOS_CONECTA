@@ -49,6 +49,8 @@ jobs:
 
       - name: Desplegar
         uses: actions/deploy-pages@v4
+        with:
+          timeout: 1800000 # 30 min: el sitio pesa ~650 MB y el despliegue puede tardar
 
       - name: Mantener workflow activo
         # GitHub desactiva los workflows programados tras 60 días sin commits.
