@@ -8,6 +8,7 @@ import json
 import textwrap
 import urllib.parse
 import time
+from collections import Counter
 from datetime import datetime, timedelta
 from oauth2client.service_account import ServiceAccountCredentials
 from concurrent.futures import ThreadPoolExecutor
@@ -62,13 +63,49 @@ def conectar_sheets():
     client = gspread.authorize(creds)
     return client.open_by_key(SHEET_ID)
 
+# Caché de imágenes: cada URL se descarga una sola vez (antes se bajaba una vez por tienda)
+cache_imagenes = {}        # url -> bytes PNG de la miniatura, o None si falló
+fallos_imagenes = Counter() # motivo -> cantidad
+ejemplos_fallo = {}         # motivo -> una URL de ejemplo
+
+def _bajar_y_cachear(url):
+    motivo = None
+    for intento in range(3):
+        try:
+            res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            if res.status_code != 200:
+                motivo = f"HTTP {res.status_code}"
+                if res.status_code in (404, 410): break
+            else:
+                with Image.open(BytesIO(res.content)) as img:
+                    img = img.convert("RGBA")
+                    img.thumbnail((520, 520))
+                    buf = BytesIO(); img.save(buf, "PNG")
+                cache_imagenes[url] = buf.getvalue()
+                return
+        except Exception as e:
+            motivo = type(e).__name__
+        time.sleep(1 + intento)
+    cache_imagenes[url] = None
+    fallos_imagenes[motivo] += 1
+    ejemplos_fallo.setdefault(motivo, url)
+
+def precargar_imagenes(urls):
+    urls = [u for u in set(urls) if u]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(_bajar_y_cachear, urls))
+    ok = sum(1 for u in urls if cache_imagenes.get(u))
+    print(f"Imágenes: {ok}/{len(urls)} URLs únicas descargadas bien.")
+    for motivo, n in fallos_imagenes.most_common():
+        print(f"  Aviso: {n} imágenes fallaron por {motivo}. Ejemplo: {ejemplos_fallo[motivo]}")
+
 def descargar_imagen(url):
-    if not url or str(url).lower() == 'nan' or str(url).strip() == "": return None
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=10)
-        return Image.open(BytesIO(res.content)).convert("RGBA")
-    except: return None
+    data = cache_imagenes.get(url)
+    if not data: return None
+    return Image.open(BytesIO(data)).convert("RGBA")
+
+def normalizar_sku(serie):
+    return serie.astype(str).str.strip().str.upper().str.replace('-EX', '', regex=False)
 
 def formatear_precio(valor):
     # Acepta números (1299, 1299.9) y textos ("S/ 1,299.90", "1.299", "1.299,90").
@@ -293,8 +330,18 @@ except Exception as e:
     lista_skus_top = []
 
 df_source['%Cod Articulo'] = df_source['%Cod Articulo'].astype(str).str.replace('-EX', '', case=False).str.strip()
-lookup_dict = df_lookup.set_index('sku')['base_image_path'].to_dict()
-df_source['image_link'] = df_source['%Cod Articulo'].map(lookup_dict).fillna('')
+# Cruce SKU -> imagen, sin importar mayúsculas, espacios ni el sufijo -EX
+df_lookup['sku_norm'] = normalizar_sku(df_lookup['sku'])
+df_lookup['base_image_path'] = df_lookup['base_image_path'].astype(str).str.strip()
+df_lookup = df_lookup[~df_lookup['base_image_path'].str.lower().isin(['', 'nan', 'none'])]
+lookup_dict = df_lookup.drop_duplicates('sku_norm').set_index('sku_norm')['base_image_path'].to_dict()
+df_source['image_link'] = normalizar_sku(df_source['%Cod Articulo']).map(lookup_dict).fillna('')
+con_link = (df_source['image_link'] != '').sum()
+print(f"listado_productos: {len(lookup_dict)} SKU con imagen. Productos del inventario con imagen asignada: {con_link}/{len(df_source)}")
+if con_link < len(df_source):
+    sin = df_source.loc[df_source['image_link'] == '', '%Cod Articulo'].unique()[:5].tolist()
+    print(f"  Ejemplos de SKU sin imagen en listado_productos: {sin}")
+precargar_imagenes(df_source['image_link'].tolist())
 
 df_source['es_top10'] = df_source['%Cod Articulo'].isin(lista_skus_top)
 
