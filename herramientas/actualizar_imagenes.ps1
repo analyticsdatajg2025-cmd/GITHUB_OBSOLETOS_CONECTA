@@ -49,8 +49,10 @@ $H = @{
 }
 
 # PowerShell 5.1 no envía el cuerpo en UTF-8 por defecto: GitHub responde 400 si hay tildes
+# Ojo: la coma en "return ," evita que PowerShell convierta el byte[] en una lista de números
 function Json-Utf8($objeto) {
-    return [System.Text.Encoding]::UTF8.GetBytes(($objeto | ConvertTo-Json -Depth 5))
+    [byte[]]$bytes = [System.Text.Encoding]::UTF8.GetBytes(($objeto | ConvertTo-Json -Depth 5))
+    return ,$bytes
 }
 
 function Md5Hex([string]$s) {
@@ -101,7 +103,7 @@ try {
     try { $release = Invoke-RestMethod -Uri "$Api/releases/tags/$Tag" -Headers $H }
     catch {
         if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
-            $body = Json-Utf8 @{ tag_name = $Tag; name = "Cache de imagenes (no borrar)";
+            [byte[]]$body = Json-Utf8 @{ tag_name = $Tag; name = "Cache de imagenes (no borrar)";
                        body = "ZIP con las imagenes de productos para los flyers. Lo actualiza herramientas/actualizar_imagenes.bat.";
                        make_latest = "false" }
             $release = Invoke-RestMethod -Method Post -Uri "$Api/releases" -Headers $H -Body $body -ContentType "application/json; charset=utf-8"
@@ -169,7 +171,7 @@ try {
         $up = "https://uploads.github.com/repos/$Owner/$Repo/releases/$($release.id)/assets?name=$tmpName"
         $nuevo = Invoke-RestMethod -Method Post -Uri $up -Headers $H -InFile $zipNuevo -ContentType "application/zip"
         if ($assetViejo) { Invoke-RestMethod -Method Delete -Uri "$Api/releases/assets/$($assetViejo.id)" -Headers $H | Out-Null }
-        $ren = Json-Utf8 @{ name = $ZipName }
+        [byte[]]$ren = Json-Utf8 @{ name = $ZipName }
         Invoke-RestMethod -Method Patch -Uri "$Api/releases/assets/$($nuevo.id)" -Headers $H -Body $ren -ContentType "application/json; charset=utf-8" | Out-Null
         Escribir "    Listo: $ZipName subido ($mb MB)." "Green"
     }
