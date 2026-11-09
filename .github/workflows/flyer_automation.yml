@@ -36,6 +36,20 @@ jobs:
         # Versiones fijas para que una actualización de pandas/Pillow no rompa el proceso
         run: pip install -r requirements.txt
 
+      - name: Bajar caché de imágenes
+        # ZIP con las imágenes que se descargan desde la red de la empresa con
+        # herramientas/actualizar_imagenes.bat (lacuracao.pe bloquea las descargas desde GitHub)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p imagenes_cache
+          if gh release download imagenes-cache --pattern imagenes_cache.zip --repo "${{ github.repository }}" --clobber; then
+            unzip -q -o imagenes_cache.zip -d imagenes_cache
+            echo "Caché de imágenes: $(ls imagenes_cache | wc -l) archivos"
+          else
+            echo "Aún no hay caché de imágenes (release 'imagenes-cache'). Se intentará descargar cada imagen."
+          fi
+
       - name: Ejecutar Script de Flyers
         env:
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
