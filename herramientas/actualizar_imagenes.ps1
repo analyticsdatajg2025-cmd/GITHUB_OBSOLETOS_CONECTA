@@ -1,11 +1,11 @@
-﻿# =====================================================================
-#  Actualizar caché de imágenes - Flyers Obsoletos
+# =====================================================================
+#  Actualizar cache de imagenes - Flyers Obsoletos
 #  Se ejecuta en la laptop (Windows) con doble clic en actualizar_imagenes.bat
 #
-#  Qué hace:
-#   1. Lee la lista de imágenes que necesitan los flyers (la publica el workflow).
-#   2. Baja el ZIP de caché actual desde el release "imagenes-cache" de GitHub.
-#   3. Descarga desde lacuracao.pe solo las imágenes que faltan (con tu red),
+#  Que hace:
+#   1. Lee la lista de imagenes que necesitan los flyers (la publica el workflow).
+#   2. Baja el ZIP de cache actual desde el release "imagenes-cache" de GitHub.
+#   3. Descarga desde lacuracao.pe solo las imagenes que faltan (con tu red),
 #      las reduce a 520 px en JPEG y borra las que ya no se usan.
 #   4. Sube el ZIP nuevo al release (reemplaza el anterior, no ocupa espacio extra).
 # =====================================================================
@@ -25,7 +25,7 @@ $Tag      = "imagenes-cache"
 $ZipName  = "imagenes_cache.zip"
 $ListaUrl = "https://$Owner.github.io/$Repo/imagenes_necesarias.txt"
 $Api      = "https://api.github.com/repos/$Owner/$Repo"
-$Lado     = 520   # px máximos (lo que ocupa la foto en el flyer)
+$Lado     = 520   # px maximos (lo que ocupa la foto en el flyer)
 
 function Escribir($texto, $color = "White") { Write-Host $texto -ForegroundColor $color }
 
@@ -36,7 +36,7 @@ if (-not (Test-Path $CfgDir)) { New-Item -ItemType Directory -Path $CfgDir | Out
 if (Test-Path $TokFile) {
     $sec = Get-Content $TokFile | ConvertTo-SecureString
 } else {
-    Escribir "Primera vez: pega tu token de GitHub (no se verá al escribir) y presiona Enter." "Yellow"
+    Escribir "Primera vez: pega tu token de GitHub (no se vera al escribir) y presiona Enter." "Yellow"
     $sec = Read-Host -AsSecureString "Token"
     $sec | ConvertFrom-SecureString | Set-Content $TokFile
 }
@@ -48,8 +48,8 @@ $H = @{
     "User-Agent"           = "flyers-obsoletos-cache"
 }
 
-# PowerShell 5.1 no envía el cuerpo en UTF-8 por defecto: GitHub responde 400 si hay tildes
-# Ojo: la coma en "return ," evita que PowerShell convierta el byte[] en una lista de números
+# PowerShell 5.1 no envia el cuerpo en UTF-8 por defecto: GitHub responde 400 si hay tildes
+# Ojo: la coma en "return ," evita que PowerShell convierta el byte[] en una lista de numeros
 function Json-Utf8($objeto) {
     [byte[]]$bytes = [System.Text.Encoding]::UTF8.GetBytes(($objeto | ConvertTo-Json -Depth 5))
     return ,$bytes
@@ -87,18 +87,18 @@ $Carpeta = Join-Path $Trabajo "imagenes"
 New-Item -ItemType Directory -Path $Carpeta -Force | Out-Null
 
 try {
-    # ---------- 1. Lista de imágenes necesarias ----------
-    Escribir "1/4 Leyendo la lista de imágenes que necesitan los flyers..."
+    # ---------- 1. Lista de imagenes necesarias ----------
+    Escribir "1/4 Leyendo la lista de imagenes que necesitan los flyers..."
     $resp = Invoke-WebRequest -Uri ($ListaUrl + "?t=" + [DateTime]::Now.Ticks) -UseBasicParsing
     $texto = $resp.Content
     if ($texto -is [byte[]]) { $texto = [System.Text.Encoding]::UTF8.GetString($texto) }
     $urls = @($texto -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -like "http*" } | Sort-Object -Unique)
     $necesarias = @{}
     foreach ($u in $urls) { $necesarias[(Md5Hex $u) + ".jpg"] = $u }
-    Escribir "    $($urls.Count) imágenes necesarias."
+    Escribir "    $($urls.Count) imagenes necesarias."
 
-    # ---------- 2. Caché actual (release) ----------
-    Escribir "2/4 Bajando la caché actual de GitHub..."
+    # ---------- 2. Cache actual (release) ----------
+    Escribir "2/4 Bajando la cache actual de GitHub..."
     $release = $null
     try { $release = Invoke-RestMethod -Uri "$Api/releases/tags/$Tag" -Headers $H }
     catch {
@@ -113,12 +113,12 @@ try {
     $assetViejo = $release.assets | Where-Object { $_.name -eq $ZipName }
     if ($assetViejo) {
         $zipViejo = Join-Path $Trabajo "viejo.zip"
-        # URL pública del archivo (el repo es público); sin token para evitar errores en la redirección
+        # URL publica del archivo (el repo es publico); sin token para evitar errores en la redireccion
         Invoke-WebRequest -Uri $assetViejo.browser_download_url -OutFile $zipViejo -UseBasicParsing
         [System.IO.Compression.ZipFile]::ExtractToDirectory($zipViejo, $Carpeta)
     }
     $existentes = @(Get-ChildItem $Carpeta -Filter *.jpg | ForEach-Object { $_.Name })
-    Escribir "    En caché: $($existentes.Count) imágenes."
+    Escribir "    En cache: $($existentes.Count) imagenes."
 
     # Borrar las que ya no se usan
     $borradas = 0
@@ -128,14 +128,19 @@ try {
 
     # ---------- 3. Descargar las que faltan ----------
     $faltan = @($necesarias.Keys | Where-Object { -not (Test-Path (Join-Path $Carpeta $_)) })
-    Escribir "3/4 Descargando $($faltan.Count) imágenes nuevas desde lacuracao.pe..."
+    Escribir "3/4 Descargando $($faltan.Count) imagenes nuevas desde lacuracao.pe..."
     $ok = 0; $fallos = @{}; $i = 0; $tmp = Join-Path $Trabajo "descarga.tmp"
     foreach ($n in $faltan) {
         $i++
         $u = $necesarias[$n]
         try {
             Invoke-WebRequest -Uri $u -OutFile $tmp -UseBasicParsing -TimeoutSec 30
-            Guardar-Miniatura $tmp (Join-Path $Carpeta $n)
+            try { Guardar-Miniatura $tmp (Join-Path $Carpeta $n) }
+            catch {
+                # Formatos que Windows no puede reducir (p. ej. .webp): se guardan tal cual,
+                # el workflow (Python/Pillow) si los lee.
+                Copy-Item $tmp (Join-Path $Carpeta $n) -Force
+            }
             $ok++
         } catch {
             $motivo = "error"
@@ -146,10 +151,10 @@ try {
             $fallos[$motivo] += $u
         }
         if ($i % 50 -eq 0) { Escribir "    $i / $($faltan.Count)..." }
-        # Si las primeras 20 fallan por bloqueo, tu red también está bloqueada: no seguir
+        # Si las primeras 20 fallan por bloqueo, tu red tambien esta bloqueada: no seguir
         if ($i -eq 20 -and $ok -eq 0 -and ($fallos.ContainsKey("HTTP 426") -or $fallos.ContainsKey("HTTP 403"))) {
-            Escribir "" ; Escribir "lacuracao.pe también está bloqueando las descargas desde esta laptop." "Red"
-            Escribir "Esta opción no funcionará: hay que pedir a TI que autorice el proceso en Fastly." "Red"
+            Escribir "" ; Escribir "lacuracao.pe tambien esta bloqueando las descargas desde esta laptop." "Red"
+            Escribir "Esta opcion no funcionara: hay que pedir a TI que autorice el proceso en Fastly." "Red"
             Read-Host "Presiona Enter para cerrar"; exit 1
         }
     }
@@ -159,9 +164,9 @@ try {
     # ---------- 4. Subir ZIP nuevo ----------
     $total = @(Get-ChildItem $Carpeta -Filter *.jpg).Count
     if ($ok -eq 0 -and $borradas -eq 0 -and $assetViejo) {
-        Escribir "4/4 No hubo cambios. La caché ya estaba al día ($total imágenes)." "Green"
+        Escribir "4/4 No hubo cambios. La cache ya estaba al dia ($total imagenes)." "Green"
     } else {
-        Escribir "4/4 Subiendo la caché a GitHub ($total imágenes)..."
+        Escribir "4/4 Subiendo la cache a GitHub ($total imagenes)..."
         $zipNuevo = Join-Path $Trabajo $ZipName
         [System.IO.Compression.ZipFile]::CreateFromDirectory($Carpeta, $zipNuevo)
         $mb = [Math]::Round((Get-Item $zipNuevo).Length / 1MB, 1)
@@ -176,13 +181,13 @@ try {
         Escribir "    Listo: $ZipName subido ($mb MB)." "Green"
     }
     Escribir ""
-    Escribir "Terminado. Los flyers usarán estas imágenes en la próxima ejecución del workflow (3 PM) o al correrlo a mano." "Green"
+    Escribir "Terminado. Los flyers usaran estas imagenes en la proxima ejecucion del workflow (3 PM) o al correrlo a mano." "Green"
 }
 catch {
     Escribir "" ; Escribir "ERROR: $($_.Exception.Message)" "Red"
     if ($_.ErrorDetails -and $_.ErrorDetails.Message) { Escribir "Detalle: $($_.ErrorDetails.Message)" "Red" }
     if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) {
-        Escribir "El token no es válido o venció. Se borrará para que pegues uno nuevo la próxima vez." "Yellow"
+        Escribir "El token no es valido o vencio. Se borrara para que pegues uno nuevo la proxima vez." "Yellow"
         Remove-Item $TokFile -ErrorAction SilentlyContinue
     }
     Read-Host "Presiona Enter para cerrar"; exit 1
