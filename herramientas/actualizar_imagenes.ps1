@@ -1,6 +1,7 @@
 # =====================================================================
-#  Actualizar cache de imagenes - Flyers Obsoletos
+#  Actualizar cache de imagenes - Flyers Obsoletos y Lento Movimiento
 #  Se ejecuta en la laptop (Windows) con doble clic en actualizar_imagenes.bat
+#  Actualiza los dos repos en una sola ejecucion (lista $Repos mas abajo).
 #
 #  Que hace:
 #   1. Lee la lista de imagenes que necesitan los flyers (la publica el workflow).
@@ -20,12 +21,16 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $Owner    = "analyticsdatajg2025-cmd"
-$Repo     = "GITHUB_OBSOLETOS_CONECTA"
 $Tag      = "imagenes-cache"
 $ZipName  = "imagenes_cache.zip"
-$ListaUrl = "https://$Owner.github.io/$Repo/imagenes_necesarias.txt"
-$Api      = "https://api.github.com/repos/$Owner/$Repo"
 $Lado     = 520   # px maximos (lo que ocupa la foto en el flyer)
+# Repos a actualizar y donde publica cada workflow su lista de imagenes necesarias
+$Repos = @(
+    @{ Nombre = "OBSOLETOS";        Repo = "GITHUB_OBSOLETOS_CONECTA";
+       Lista  = "https://$Owner.github.io/GITHUB_OBSOLETOS_CONECTA/imagenes_necesarias.txt" },
+    @{ Nombre = "LENTO MOVIMIENTO"; Repo = "GITHUB_LENTO-MOVIMIENTO_CONECTA";
+       Lista  = "https://github.com/$Owner/GITHUB_LENTO-MOVIMIENTO_CONECTA/releases/download/$Tag/imagenes_necesarias.txt" }
+)
 
 function Escribir($texto, $color = "White") { Write-Host $texto -ForegroundColor $color }
 
@@ -81,12 +86,17 @@ function Guardar-Miniatura([string]$origen, [string]$destino) {
     } finally { $img.Dispose() }
 }
 
-$Trabajo = Join-Path $env:TEMP "flyers_obsoletos_cache"
+$Trabajo = Join-Path $env:TEMP "flyers_cache_imagenes"
 if (Test-Path $Trabajo) { Remove-Item $Trabajo -Recurse -Force }
-$Carpeta = Join-Path $Trabajo "imagenes"
-New-Item -ItemType Directory -Path $Carpeta -Force | Out-Null
+$Pool = Join-Path $Trabajo "pool"
+New-Item -ItemType Directory -Path $Pool -Force | Out-Null
 
-try {
+function Actualizar-Repo($Repo, $ListaUrl) {
+    $Api = "https://api.github.com/repos/$Owner/$Repo"
+    $Base = Join-Path $Trabajo $Repo
+    $Carpeta = Join-Path $Base "imagenes"
+    New-Item -ItemType Directory -Path $Carpeta -Force | Out-Null
+    $Trabajo = $Base
     # ---------- 1. Lista de imagenes necesarias ----------
     Escribir "1/4 Leyendo la lista de imagenes que necesitan los flyers..."
     $resp = Invoke-WebRequest -Uri ($ListaUrl + "?t=" + [DateTime]::Now.Ticks) -UseBasicParsing
@@ -133,6 +143,8 @@ try {
     foreach ($n in $faltan) {
         $i++
         $u = $necesarias[$n]
+        $enPool = Join-Path $Pool $n
+        if (Test-Path $enPool) { Copy-Item $enPool (Join-Path $Carpeta $n) -Force; $ok++; continue }
         try {
             Invoke-WebRequest -Uri $u -OutFile $tmp -UseBasicParsing -TimeoutSec 30
             try { Guardar-Miniatura $tmp (Join-Path $Carpeta $n) }
@@ -153,9 +165,7 @@ try {
         if ($i % 50 -eq 0) { Escribir "    $i / $($faltan.Count)..." }
         # Si las primeras 20 fallan por bloqueo, tu red tambien esta bloqueada: no seguir
         if ($i -eq 20 -and $ok -eq 0 -and ($fallos.ContainsKey("HTTP 426") -or $fallos.ContainsKey("HTTP 403"))) {
-            Escribir "" ; Escribir "lacuracao.pe tambien esta bloqueando las descargas desde esta laptop." "Red"
-            Escribir "Esta opcion no funcionara: hay que pedir a TI que autorice el proceso en Fastly." "Red"
-            Read-Host "Presiona Enter para cerrar"; exit 1
+            throw "BLOQUEO: lacuracao.pe tambien esta bloqueando las descargas desde esta laptop. Esta opcion no funcionara: hay que pedir a TI que autorice el proceso en Fastly."
         }
     }
     Escribir "    Descargadas: $ok. Borradas por no usarse: $borradas." "Green"
@@ -180,8 +190,44 @@ try {
         Invoke-RestMethod -Method Patch -Uri "$Api/releases/assets/$($nuevo.id)" -Headers $H -Body $ren -ContentType "application/json; charset=utf-8" | Out-Null
         Escribir "    Listo: $ZipName subido ($mb MB)." "Green"
     }
+    # Guardar en el pool para no volver a bajar las mismas imagenes en el siguiente repo
+    Get-ChildItem $Carpeta -Filter *.jpg | ForEach-Object {
+        $dest = Join-Path $Pool $_.Name
+        if (-not (Test-Path $dest)) { Copy-Item $_.FullName $dest }
+    }
+}
+
+$errores = 0
+try {
+    foreach ($r in $Repos) {
+        Escribir ""
+        Escribir "==================== $($r.Nombre) ====================" "Cyan"
+        try {
+            Actualizar-Repo $r.Repo $r.Lista
+        } catch {
+            $errores++
+            $msg = $_.Exception.Message
+            Escribir "ERROR en $($r.Nombre): $msg" "Red"
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) { Escribir "Detalle: $($_.ErrorDetails.Message)" "Red" }
+            $code = 0
+            if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+            if ($code -eq 401) {
+                Escribir "El token no es valido o vencio. Se borrara para que pegues uno nuevo la proxima vez." "Yellow"
+                Remove-Item $TokFile -ErrorAction SilentlyContinue
+            } elseif ($code -eq 403) {
+                Escribir "El token no tiene permiso sobre $($r.Repo). En GitHub edita el token y agrega ese repositorio (Contents: Read and write)." "Yellow"
+            } elseif ($code -eq 404 -and $msg -notmatch "BLOQUEO") {
+                Escribir "Aun no existe la lista de imagenes de $($r.Nombre): ejecuta primero su workflow en GitHub (Actions) y vuelve a intentar." "Yellow"
+            }
+            if ($msg -match "BLOQUEO") { break }
+        }
+    }
     Escribir ""
-    Escribir "Terminado. Los flyers usaran estas imagenes en la proxima ejecucion del workflow (3 PM) o al correrlo a mano." "Green"
+    if ($errores -eq 0) {
+        Escribir "Terminado. Los flyers usaran estas imagenes en la proxima ejecucion de cada workflow (3 PM) o al correrlo a mano." "Green"
+    } else {
+        Escribir "Terminado con $errores error(es). Revisa los mensajes en rojo." "Yellow"
+    }
 }
 catch {
     Escribir "" ; Escribir "ERROR: $($_.Exception.Message)" "Red"
