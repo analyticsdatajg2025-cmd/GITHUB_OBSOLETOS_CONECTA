@@ -8,6 +8,7 @@ import json
 import textwrap
 import urllib.parse
 import time
+import hashlib
 from collections import Counter
 from datetime import datetime, timedelta
 from oauth2client.service_account import ServiceAccountCredentials
@@ -65,15 +66,23 @@ def conectar_sheets():
     return client.open_by_key(SHEET_ID)
 
 # Caché de imágenes: cada URL se descarga una sola vez (antes se bajaba una vez por tienda)
-cache_imagenes = {}        # url -> bytes PNG de la miniatura, o None si falló
+cache_imagenes = {}        # url -> bytes de la miniatura, o None si falló
 fallos_imagenes = Counter() # motivo -> cantidad
 ejemplos_fallo = {}         # motivo -> una URL de ejemplo
 
+# Carpeta con imágenes ya descargadas desde la red de la empresa (herramientas/actualizar_imagenes.bat).
+# El workflow la llena bajando el ZIP del release "imagenes-cache". Nombre de archivo = md5(url).jpg
+CARPETA_CACHE = "imagenes_cache"
+LISTA_NECESARIAS = "docs/imagenes_necesarias.txt"  # se publica en Pages
+
 BLOQUEOS = (401, 403, 404, 410, 426, 429)  # respuestas que no mejoran reintentando
-corte_por_bloqueo = {"activo": False}
+estado_descargas = {"intentadas": 0, "ok": 0, "corte": False}
+
+def nombre_cache(url):
+    return hashlib.md5(url.encode("utf-8")).hexdigest() + ".jpg"
 
 def _bajar_y_cachear(url):
-    if corte_por_bloqueo["activo"]:
+    if estado_descargas["corte"]:
         cache_imagenes[url] = None
         fallos_imagenes["omitida (servidor bloqueando)"] += 1
         return
@@ -90,6 +99,8 @@ def _bajar_y_cachear(url):
                     img.thumbnail((520, 520))
                     buf = BytesIO(); img.save(buf, "PNG")
                 cache_imagenes[url] = buf.getvalue()
+                estado_descargas["intentadas"] += 1
+                estado_descargas["ok"] += 1
                 return
         except Exception as e:
             motivo = type(e).__name__
@@ -97,22 +108,38 @@ def _bajar_y_cachear(url):
     cache_imagenes[url] = None
     fallos_imagenes[motivo] += 1
     ejemplos_fallo.setdefault(motivo, url)
-    # Si las primeras 30 fallan todas por bloqueo del servidor, no insistir con el resto
-    intentadas = sum(fallos_imagenes.values()) + sum(1 for v in cache_imagenes.values() if v)
-    if intentadas >= 30 and not any(cache_imagenes.values()) and motivo in ("HTTP 426", "HTTP 403", "HTTP 429"):
-        corte_por_bloqueo["activo"] = True
+    estado_descargas["intentadas"] += 1
+    # Si las primeras 30 descargas fallan todas por bloqueo del servidor, no insistir con el resto
+    if estado_descargas["intentadas"] >= 30 and estado_descargas["ok"] == 0 and motivo in ("HTTP 426", "HTTP 403", "HTTP 429"):
+        estado_descargas["corte"] = True
 
 def precargar_imagenes(urls):
-    urls = [u for u in set(urls) if u]
+    urls = sorted(set(u for u in urls if u))
+    # Lista que usa herramientas/actualizar_imagenes.ps1 para saber qué imágenes bajar
+    os.makedirs(os.path.dirname(LISTA_NECESARIAS), exist_ok=True)
+    with open(LISTA_NECESARIAS, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(urls) + "\n")
+
+    desde_cache, faltantes = 0, []
+    for u in urls:
+        ruta = os.path.join(CARPETA_CACHE, nombre_cache(u))
+        if os.path.exists(ruta):
+            with open(ruta, "rb") as f:
+                cache_imagenes[u] = f.read()
+            desde_cache += 1
+        else:
+            faltantes.append(u)
+    print(f"Imágenes: {desde_cache}/{len(urls)} tomadas de la caché ({CARPETA_CACHE}). Faltan {len(faltantes)}.")
+
     with ThreadPoolExecutor(max_workers=8) as ex:
-        list(ex.map(_bajar_y_cachear, urls))
+        list(ex.map(_bajar_y_cachear, faltantes))
     ok = sum(1 for u in urls if cache_imagenes.get(u))
-    print(f"Imágenes: {ok}/{len(urls)} URLs únicas descargadas bien.")
+    print(f"Imágenes: {ok}/{len(urls)} disponibles para los flyers ({estado_descargas['ok']} descargadas ahora).")
     for motivo, n in fallos_imagenes.most_common():
         print(f"  Aviso: {n} imágenes fallaron por {motivo}. Ejemplo: {ejemplos_fallo.get(motivo, '-')}")
-    if corte_por_bloqueo["activo"]:
-        print("  Aviso: el servidor de imágenes está BLOQUEANDO las descargas (WAF/CDN). "
-              "Los flyers salen sin imagen hasta que se permita el acceso desde GitHub Actions.")
+    if estado_descargas["corte"] or (faltantes and estado_descargas["ok"] == 0):
+        print("  Aviso: lacuracao.pe bloquea las descargas desde GitHub. Para completar las imágenes "
+              "faltantes, ejecuta herramientas/actualizar_imagenes.bat en tu laptop.")
 
 def descargar_imagen(url):
     data = cache_imagenes.get(url)
