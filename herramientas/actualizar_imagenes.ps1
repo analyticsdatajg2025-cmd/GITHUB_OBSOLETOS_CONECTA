@@ -48,6 +48,11 @@ $H = @{
     "User-Agent"           = "flyers-obsoletos-cache"
 }
 
+# PowerShell 5.1 no envía el cuerpo en UTF-8 por defecto: GitHub responde 400 si hay tildes
+function Json-Utf8($objeto) {
+    return [System.Text.Encoding]::UTF8.GetBytes(($objeto | ConvertTo-Json -Depth 5))
+}
+
 function Md5Hex([string]$s) {
     $md5 = [System.Security.Cryptography.MD5]::Create()
     $bytes = $md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($s))
@@ -96,10 +101,10 @@ try {
     try { $release = Invoke-RestMethod -Uri "$Api/releases/tags/$Tag" -Headers $H }
     catch {
         if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
-            $body = @{ tag_name = $Tag; name = "Caché de imágenes (no borrar)";
-                       body = "ZIP con las imágenes de productos para los flyers. Lo actualiza herramientas/actualizar_imagenes.bat.";
-                       make_latest = "false" } | ConvertTo-Json
-            $release = Invoke-RestMethod -Method Post -Uri "$Api/releases" -Headers $H -Body $body -ContentType "application/json"
+            $body = Json-Utf8 @{ tag_name = $Tag; name = "Cache de imagenes (no borrar)";
+                       body = "ZIP con las imagenes de productos para los flyers. Lo actualiza herramientas/actualizar_imagenes.bat.";
+                       make_latest = "false" }
+            $release = Invoke-RestMethod -Method Post -Uri "$Api/releases" -Headers $H -Body $body -ContentType "application/json; charset=utf-8"
             Escribir "    Release '$Tag' creado (primera vez)."
         } else { throw }
     }
@@ -164,8 +169,8 @@ try {
         $up = "https://uploads.github.com/repos/$Owner/$Repo/releases/$($release.id)/assets?name=$tmpName"
         $nuevo = Invoke-RestMethod -Method Post -Uri $up -Headers $H -InFile $zipNuevo -ContentType "application/zip"
         if ($assetViejo) { Invoke-RestMethod -Method Delete -Uri "$Api/releases/assets/$($assetViejo.id)" -Headers $H | Out-Null }
-        $ren = @{ name = $ZipName } | ConvertTo-Json
-        Invoke-RestMethod -Method Patch -Uri "$Api/releases/assets/$($nuevo.id)" -Headers $H -Body $ren -ContentType "application/json" | Out-Null
+        $ren = Json-Utf8 @{ name = $ZipName }
+        Invoke-RestMethod -Method Patch -Uri "$Api/releases/assets/$($nuevo.id)" -Headers $H -Body $ren -ContentType "application/json; charset=utf-8" | Out-Null
         Escribir "    Listo: $ZipName subido ($mb MB)." "Green"
     }
     Escribir ""
@@ -173,6 +178,7 @@ try {
 }
 catch {
     Escribir "" ; Escribir "ERROR: $($_.Exception.Message)" "Red"
+    if ($_.ErrorDetails -and $_.ErrorDetails.Message) { Escribir "Detalle: $($_.ErrorDetails.Message)" "Red" }
     if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) {
         Escribir "El token no es válido o venció. Se borrará para que pegues uno nuevo la próxima vez." "Yellow"
         Remove-Item $TokFile -ErrorAction SilentlyContinue
