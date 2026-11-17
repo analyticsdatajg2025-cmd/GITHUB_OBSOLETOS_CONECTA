@@ -13,6 +13,9 @@ from collections import Counter
 from datetime import datetime, timedelta
 from oauth2client.service_account import ServiceAccountCredentials
 from concurrent.futures import ThreadPoolExecutor
+import resumen as R  # resumen de la ejecución para el monitor de MKT SISTEMA
+
+R.iniciar("obsoletos")
 
 # --- CONFIGURACIÓN DE LIENZO ---
 ANCHO, ALTO = 2500, 3750
@@ -135,6 +138,7 @@ def precargar_imagenes(urls):
         list(ex.map(_bajar_y_cachear, faltantes))
     ok = sum(1 for u in urls if cache_imagenes.get(u))
     print(f"Imágenes: {ok}/{len(urls)} disponibles para los flyers ({estado_descargas['ok']} descargadas ahora).")
+    R.dato(imagenes_total=len(urls), imagenes_faltantes=len(urls) - ok, imagenes_desde_cache=desde_cache)
     for motivo, n in fallos_imagenes.most_common():
         print(f"  Aviso: {n} imágenes fallaron por {motivo}. Ejemplo: {ejemplos_fallo.get(motivo, '-')}")
     if estado_descargas["corte"] or (faltantes and estado_descargas["ok"] == 0):
@@ -370,9 +374,15 @@ try:
     hoy = ahora_peru.replace(hour=0, minute=0, second=0, microsecond=0)
     lista_skus_top = df_top10[df_top10['Fin de vigencia'] >= hoy]['SKU'].tolist()
     print(f"Top 10 vigentes cargados: {len(lista_skus_top)}")
+    fin_max = df_top10['Fin de vigencia'].max()
+    # La data está al día si el Top 10 tiene productos con vigencia hasta hoy o después
+    R.dato(top10_filas=len(df_top10), top10_vigentes=len(lista_skus_top),
+           top10_fin_vigencia=fin_max.strftime("%Y-%m-%d") if pd.notna(fin_max) else "",
+           data_actualizada=len(lista_skus_top) > 0)
 except Exception as e:
     print(f"Aviso: Error procesando Top 10 ({e}).")
     lista_skus_top = []
+    R.dato(top10_vigentes=0, data_actualizada=False, top10_error=str(e)[:200])
 
 df_source['%Cod Articulo'] = df_source['%Cod Articulo'].astype(str).str.replace('-EX', '', case=False).str.strip()
 # Cruce SKU -> imagen, sin importar mayúsculas, espacios ni el sufijo -EX
@@ -383,6 +393,7 @@ lookup_dict = df_lookup.drop_duplicates('sku_norm').set_index('sku_norm')['base_
 df_source['image_link'] = normalizar_sku(df_source['%Cod Articulo']).map(lookup_dict).fillna('')
 con_link = (df_source['image_link'] != '').sum()
 print(f"listado_productos: {len(lookup_dict)} SKU con imagen. Productos del inventario con imagen asignada: {con_link}/{len(df_source)}")
+R.dato(productos_total=len(df_source), productos_sin_imagen=int(len(df_source) - con_link))
 if con_link < len(df_source):
     sin = df_source.loc[df_source['image_link'] == '', '%Cod Articulo'].unique()[:5].tolist()
     print(f"  Ejemplos de SKU sin imagen en listado_productos: {sin}")
@@ -398,11 +409,21 @@ ws_detalle.update(values=[df_source.columns.values.tolist()] + df_source.values.
 # Generar PDFs
 grupos = df_source.groupby('Tienda Retail')
 tienda_links_pdf = []
+R.dato(total_tiendas=sum(1 for n, _ in grupos if str(n).strip()))
 with ThreadPoolExecutor(max_workers=2) as executor:
-    futuros = [executor.submit(procesar_tienda, n, g) for n, g in grupos if str(n).strip()]
-    for f in futuros:
-        res = f.result()
-        if res: tienda_links_pdf.append(res)
+    futuros = [(n, len(g), executor.submit(procesar_tienda, n, g)) for n, g in grupos if str(n).strip()]
+    for n, cant, f in futuros:
+        try:
+            res = f.result()
+        except Exception as e:
+            R.tienda(n, False, cant, error_txt=f"{type(e).__name__}: {e}")
+            raise
+        if res:
+            tienda_links_pdf.append(res)
+            R.tienda(n, True, cant, url=res[1])
+        else:
+            R.tienda(n, False, cant, error_txt="No se generó el PDF")
+R.dato(pdfs=len(tienda_links_pdf))
 
 # REFUERZO: Pequeña pausa para no saturar la API antes del paso final
 time.sleep(3)
