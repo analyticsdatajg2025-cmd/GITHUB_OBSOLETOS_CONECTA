@@ -51,6 +51,7 @@ jobs:
           fi
 
       - name: Ejecutar Script de Flyers
+        id: script
         env:
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
           PYTHONUNBUFFERED: 1
@@ -63,6 +64,29 @@ jobs:
 
       - name: Desplegar
         uses: actions/deploy-pages@v4
+
+      - name: Publicar resumen para MKT SISTEMA
+        # Solo informa: el monitor «Lento y Obsoletos» de MKT SISTEMA lee este JSON del release
+        # «resumenes». Corre siempre y nunca hace fallar el job.
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESUMEN_PROCESO: obsoletos
+          RESUMEN_BLOQUE: '0'
+        run: |
+          python3 resumen.py cerrar "${{ steps.script.outcome }}"
+          R="${{ github.repository }}"
+          gh release view resumenes --repo "$R" >/dev/null 2>&1 || \
+            gh release create resumenes --repo "$R" --title "Resumenes de ejecucion (no borrar)" --latest=false \
+              --notes "Un JSON por ejecucion con el resumen que lee MKT SISTEMA. Se limpian solos a los 5 dias." || true
+          ARCH="obsoletos_${GITHUB_RUN_ID}_0.json"
+          cp resumen.json "$ARCH"
+          for i in 1 2 3; do gh release upload resumenes "$ARCH" --clobber --repo "$R" && break; sleep 5; done
+          # Los de más de 5 días ya los guardó MKT SISTEMA (los conserva 30 días)
+          LIMITE=$(date -u -d '5 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          gh api "repos/$R/releases/tags/resumenes" --jq ".assets[] | select(.updated_at < \"$LIMITE\") | .id" | \
+            while read -r id; do gh api -X DELETE "repos/$R/releases/assets/$id" || true; done
 
       - name: Mantener workflow activo
         # GitHub desactiva los workflows programados tras 60 días sin commits.
